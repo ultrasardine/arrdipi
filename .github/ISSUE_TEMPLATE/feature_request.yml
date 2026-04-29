@@ -1,0 +1,66 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature. Please describe the use case and expected behavior.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: What problem does this feature solve? What are you trying to accomplish?
+      placeholder: I want to be able to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the feature or API you'd like to see.
+      placeholder: |
+        A new method `session.do_something()` that...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or workarounds you've considered.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of arrdipi does this relate to?
+      options:
+        - Transport (TCP, X.224)
+        - Security (TLS, NLA, Standard)
+        - MCS / Channel Layer
+        - PDU Framework
+        - Graphics / Codecs
+        - Virtual Channels
+        - Session / Connection
+        - CLI
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: Protocol References
+      description: If applicable, reference the relevant MS-RDP specification sections.
+      placeholder: "[MS-RDPBCGR] Section 2.2.x.x"
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context, mockups, or examples.

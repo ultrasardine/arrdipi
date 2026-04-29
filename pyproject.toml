@@ -1,0 +1,58 @@
+[project]
+name = "arrdipi"
+version = "0.1.0"
+description = "A pure Python RDP client library implementing the full protocol stack"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+authors = [
+    { name = "arrdipi contributors" },
+]
+keywords = [
+    "rdp",
+    "remote-desktop",
+    "remote-desktop-protocol",
+    "rdp-client",
+    "microsoft",
+    "asyncio",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: AsyncIO",
+    "Typing :: Typed",
+]
+dependencies = [
+    "av",
+    "cryptography",
+    "pygame",
+    "pyspnego",
+    "sounddevice",
+]
+
+[project.urls]
+Homepage = "https://github.com/arrdipi/arrdipi"
+Repository = "https://github.com/arrdipi/arrdipi"
+Issues = "https://github.com/arrdipi/arrdipi/issues"
+Changelog = "https://github.com/arrdipi/arrdipi/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/arrdipi/arrdipi#readme"
+
+[project.scripts]
+arrdipi = "arrdipi.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
