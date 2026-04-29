@@ -342,6 +342,10 @@ class TestDriveChannelReadOnly:
             io_status = struct.unpack_from("<I", response_data, 12)[0]
             assert io_status == STATUS_ACCESS_DENIED
 
+            # Close open handles so Windows can clean up the temp directory
+            for handle in list(channel.open_handles.values()):
+                handle.close()
+
     @pytest.mark.asyncio
     async def test_read_allowed_on_read_only_drive(self) -> None:
         """Read access is allowed on a read-only drive."""
@@ -368,6 +372,10 @@ class TestDriveChannelReadOnly:
             response_data = send_fn.call_args[0][0]
             io_status = struct.unpack_from("<I", response_data, 12)[0]
             assert io_status == STATUS_SUCCESS
+
+            # Close open handles so Windows can clean up the temp directory
+            for handle in list(channel.open_handles.values()):
+                handle.close()
 
 
 class TestDriveChannelIoRequests:
@@ -470,6 +478,10 @@ class TestDriveChannelIoRequests:
                 content = f.read()
             assert content[:5] == b"HELLO"
 
+            # Close open handles so Windows can clean up the temp directory
+            for handle in list(channel.open_handles.values()):
+                handle.close()
+
     @pytest.mark.asyncio
     async def test_query_information(self) -> None:
         """Query file information returns success."""
@@ -501,6 +513,10 @@ class TestDriveChannelIoRequests:
             response_data = send_fn.call_args[0][0]
             io_status = struct.unpack_from("<I", response_data, 12)[0]
             assert io_status == STATUS_SUCCESS
+
+            # Close open handles so Windows can clean up the temp directory
+            for handle in list(channel.open_handles.values()):
+                handle.close()
 
     @pytest.mark.asyncio
     async def test_directory_control(self) -> None:
