@@ -48,10 +48,10 @@ arrdipi provides both a **programmatic async Python API** for building custom RD
 
 ```bash
 # Using uv (recommended)
-uv add arrdipi
+uv add git+https://github.com/ultrasardine/arrdipi.git
 
 # Using pip
-pip install arrdipi
+pip install git+https://github.com/ultrasardine/arrdipi.git
 ```
 
 ### Dependencies
