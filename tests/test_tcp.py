@@ -118,9 +118,11 @@ async def test_close_closes_writer():
 
 @pytest.mark.asyncio
 async def test_upgrade_to_tls_replaces_reader():
-    """upgrade_to_tls() upgrades the transport and replaces reader/writer."""
+    """upgrade_to_tls() detaches socket, re-creates connection with ssl=."""
     mock_reader = AsyncMock(spec=asyncio.StreamReader)
     mock_writer = MagicMock(spec=asyncio.StreamWriter)
+    mock_writer.close = MagicMock()
+    mock_writer.wait_closed = AsyncMock()
 
     # Mock the underlying transport with socket info
     mock_transport = MagicMock()
@@ -129,13 +131,12 @@ async def test_upgrade_to_tls_replaces_reader():
     mock_sock.family = 2  # AF_INET
     mock_sock.type = 1  # SOCK_STREAM
     mock_transport.get_extra_info.return_value = mock_sock
-    mock_transport.pause_reading = MagicMock()
-    mock_transport.close = MagicMock()
     mock_writer.transport = mock_transport
 
     mock_ssl_context = MagicMock(spec=ssl.SSLContext)
-    mock_ssl_sock = MagicMock()
-    mock_ssl_context.wrap_socket.return_value = mock_ssl_sock
+
+    # Mock the dup'd raw socket
+    mock_raw_sock = MagicMock()
 
     # Mock the new transport/protocol from create_connection
     mock_new_transport = MagicMock()
@@ -144,7 +145,7 @@ async def test_upgrade_to_tls_replaces_reader():
     transport = TcpTransport(reader=mock_reader, writer=mock_writer)
 
     with (
-        patch("arrdipi.transport.tcp.socket.fromfd", return_value=mock_sock),
+        patch("arrdipi.transport.tcp.socket.fromfd", return_value=mock_raw_sock),
         patch("asyncio.get_event_loop") as mock_get_loop,
     ):
         mock_loop = MagicMock()
@@ -155,15 +156,19 @@ async def test_upgrade_to_tls_replaces_reader():
 
         await transport.upgrade_to_tls(mock_ssl_context, "rdp.example.com")
 
-    # Verify socket-level TLS handshake was performed
-    mock_ssl_context.wrap_socket.assert_called_once_with(
-        mock_sock,
-        server_hostname="rdp.example.com",
-        do_handshake_on_connect=True,
-    )
+    # Verify the writer was closed to release the original transport
+    mock_writer.close.assert_called_once()
+    mock_writer.wait_closed.assert_awaited_once()
 
-    # Verify asyncio streams were re-created from the TLS socket
+    # Verify the dup'd socket was set to non-blocking
+    mock_raw_sock.setblocking.assert_called_once_with(False)
+
+    # Verify create_connection was called with ssl= and server_hostname
     mock_loop.create_connection.assert_awaited_once()
+    call_kwargs = mock_loop.create_connection.call_args[1]
+    assert call_kwargs["sock"] is mock_raw_sock
+    assert call_kwargs["ssl"] is mock_ssl_context
+    assert call_kwargs["server_hostname"] == "rdp.example.com"
 
     # Reader and writer should be replaced
     assert transport.reader is not mock_reader

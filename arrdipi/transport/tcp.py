@@ -90,10 +90,17 @@ class TcpTransport:
     ) -> None:
         """Upgrade the plain TCP socket to TLS in-place.
 
-        Uses socket-level TLS wrapping instead of asyncio's start_tls()
-        to work around a known issue where start_tls() fails on macOS
-        when the connection has already exchanged data (e.g. X.224
-        negotiation bytes confuse asyncio's TLS state machine).
+        Detaches the raw socket from the current asyncio transport, then
+        re-creates the connection with ``ssl=ssl_context`` so asyncio
+        performs the TLS handshake asynchronously on the dup'd fd.
+
+        This avoids both:
+        - ``loop.start_tls()`` which fails on macOS when the connection
+          has already exchanged data (X.224 negotiation confuses its
+          TLS state machine).
+        - Passing a pre-wrapped SSLSocket to ``create_connection`` without
+          ``ssl=``, which leaves asyncio unaware of TLS (breaks
+          ``get_extra_info("ssl_object")`` needed by CredSSP).
 
         Args:
             ssl_context: Configured SSL context for the TLS handshake.
@@ -107,31 +114,23 @@ class TcpTransport:
         transport = self.writer.transport
         sock = transport.get_extra_info("socket")
 
-        # Pause reading so asyncio doesn't interfere during upgrade
-        transport.pause_reading()
+        # Dup the fd so we can close the asyncio transport without losing the connection
+        raw_sock = socket.fromfd(sock.fileno(), sock.family, sock.type)
+        raw_sock.setblocking(False)
 
-        # Dup the socket so we can close the asyncio transport without closing the fd
-        raw_fd = sock.fileno()
-        raw_sock = socket.fromfd(raw_fd, sock.family, sock.type)
-        raw_sock.settimeout(10)
+        # Close the asyncio transport (closes the original fd, dup'd fd stays open)
+        self.writer.close()
+        await self.writer.wait_closed()
 
-        # Close the asyncio transport (but not the underlying fd since we dup'd)
-        self.writer.transport.close()
-
-        # Perform TLS handshake on the raw socket
-        ssl_sock = ssl_context.wrap_socket(
-            raw_sock,
-            server_hostname=server_hostname,
-            do_handshake_on_connect=True,
-        )
-        ssl_sock.setblocking(False)
-
-        # Re-create asyncio streams from the TLS-wrapped socket
+        # Re-create the connection WITH TLS — asyncio handles the handshake
         loop = asyncio.get_event_loop()
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
         new_transport, _ = await loop.create_connection(
-            lambda: protocol, sock=ssl_sock
+            lambda: protocol,
+            sock=raw_sock,
+            ssl=ssl_context,
+            server_hostname=server_hostname or "",
         )
         writer = asyncio.StreamWriter(new_transport, protocol, reader, loop)
 
