@@ -7,6 +7,7 @@ Supports in-place TLS upgrade for Enhanced RDP Security (Req 10, AC 1).
 from __future__ import annotations
 
 import asyncio
+import socket
 import ssl
 from dataclasses import dataclass, field
 
@@ -85,39 +86,54 @@ class TcpTransport:
         await self.writer.wait_closed()
 
     async def upgrade_to_tls(
-        self, ssl_context: ssl.SSLContext, server_hostname: str
+        self, ssl_context: ssl.SSLContext, server_hostname: str | None
     ) -> None:
         """Upgrade the plain TCP socket to TLS in-place.
 
-        Replaces reader/writer with TLS-wrapped streams using
-        the event loop's start_tls() method. Upper layers continue
-        using the same TcpTransport instance transparently.
+        Uses socket-level TLS wrapping instead of asyncio's start_tls()
+        to work around a known issue where start_tls() fails on macOS
+        when the connection has already exchanged data (e.g. X.224
+        negotiation bytes confuse asyncio's TLS state machine).
 
         Args:
             ssl_context: Configured SSL context for the TLS handshake.
-            server_hostname: Server hostname for SNI and certificate verification.
+            server_hostname: Server hostname for SNI and certificate
+                verification, or None to skip SNI.
 
         Raises:
             ssl.SSLError: If the TLS handshake fails.
         """
-        loop = asyncio.get_event_loop()
+        # Get the raw socket from the asyncio transport
         transport = self.writer.transport
-        protocol = transport.get_protocol()
+        sock = transport.get_extra_info("socket")
 
-        new_transport = await loop.start_tls(
-            transport,
-            protocol,
-            ssl_context,
+        # Pause reading so asyncio doesn't interfere during upgrade
+        transport.pause_reading()
+
+        # Dup the socket so we can close the asyncio transport without closing the fd
+        raw_fd = sock.fileno()
+        raw_sock = socket.fromfd(raw_fd, sock.family, sock.type)
+        raw_sock.settimeout(10)
+
+        # Close the asyncio transport (but not the underlying fd since we dup'd)
+        self.writer.transport.close()
+
+        # Perform TLS handshake on the raw socket
+        ssl_sock = ssl_context.wrap_socket(
+            raw_sock,
             server_hostname=server_hostname,
+            do_handshake_on_connect=True,
         )
+        ssl_sock.setblocking(False)
 
-        # Replace the writer's transport with the TLS-wrapped one
-        self.writer._transport = new_transport  # noqa: SLF001
+        # Re-create asyncio streams from the TLS-wrapped socket
+        loop = asyncio.get_event_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        new_transport, _ = await loop.create_connection(
+            lambda: protocol, sock=ssl_sock
+        )
+        writer = asyncio.StreamWriter(new_transport, protocol, reader, loop)
 
-        # Create a new reader connected to the upgraded transport
-        new_reader = asyncio.StreamReader()
-        new_protocol = asyncio.StreamReaderProtocol(new_reader)
-        new_protocol.connection_made(new_transport)
-        new_transport.set_protocol(new_protocol)
-
-        self.reader = new_reader
+        self.reader = reader
+        self.writer = writer
