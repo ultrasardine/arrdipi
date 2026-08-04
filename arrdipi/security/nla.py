@@ -217,22 +217,35 @@ class NlaSecurityLayer(SecurityLayer):
         """Extract the server's TLS public key from the SSL socket.
 
         Returns the DER-encoded SubjectPublicKeyInfo from the server certificate.
+        The socket is accessed directly since we use a plain asyncio transport
+        over an already-wrapped SSLSocket (no ssl_object via get_extra_info).
         """
         transport = tcp.writer.transport
+        # Try ssl_object first (works with asyncio SSLTransport)
         ssl_object = transport.get_extra_info("ssl_object")
-        if ssl_object is None:
-            # Fallback: return empty bytes (will fail during handshake)
-            return b""
-        peer_cert_der = ssl_object.getpeercert(binary_form=True)
+        if ssl_object is not None:
+            peer_cert_der = ssl_object.getpeercert(binary_form=True)
+        else:
+            # Fallback: get the socket directly (it's an SSLSocket)
+            sock = transport.get_extra_info("socket")
+            if sock is None or not hasattr(sock, "getpeercert"):
+                return b""
+            peer_cert_der = sock.getpeercert(binary_form=True)
+
         if peer_cert_der is None:
             return b""
+
         # Extract SubjectPublicKeyInfo from the certificate
         from cryptography import x509
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            PublicFormat,
+        )
 
         cert = x509.load_der_x509_certificate(peer_cert_der)
         return cert.public_key().public_bytes(
-            encoding=__import__("cryptography").hazmat.primitives.serialization.Encoding.DER,
-            format=__import__("cryptography").hazmat.primitives.serialization.PublicFormat.SubjectPublicKeyInfo,
+            encoding=Encoding.DER,
+            format=PublicFormat.SubjectPublicKeyInfo,
         )
 
     async def _recv_tsrequest(self, tcp: TcpTransport) -> bytes:

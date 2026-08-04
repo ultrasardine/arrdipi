@@ -118,7 +118,7 @@ async def test_close_closes_writer():
 
 @pytest.mark.asyncio
 async def test_upgrade_to_tls_replaces_reader():
-    """upgrade_to_tls() detaches socket, re-creates connection with ssl=."""
+    """upgrade_to_tls() does blocking wrap_socket then re-creates asyncio streams."""
     mock_reader = AsyncMock(spec=asyncio.StreamReader)
     mock_writer = MagicMock(spec=asyncio.StreamWriter)
     mock_writer.close = MagicMock()
@@ -134,6 +134,8 @@ async def test_upgrade_to_tls_replaces_reader():
     mock_writer.transport = mock_transport
 
     mock_ssl_context = MagicMock(spec=ssl.SSLContext)
+    mock_ssl_sock = MagicMock()
+    mock_ssl_context.wrap_socket.return_value = mock_ssl_sock
 
     # Mock the dup'd raw socket
     mock_raw_sock = MagicMock()
@@ -160,15 +162,18 @@ async def test_upgrade_to_tls_replaces_reader():
     mock_writer.close.assert_called_once()
     mock_writer.wait_closed.assert_awaited_once()
 
-    # Verify the dup'd socket was set to non-blocking
-    mock_raw_sock.setblocking.assert_called_once_with(False)
+    # Verify blocking TLS handshake was performed
+    mock_ssl_context.wrap_socket.assert_called_once_with(
+        mock_raw_sock,
+        server_hostname="rdp.example.com",
+        do_handshake_on_connect=True,
+    )
 
-    # Verify create_connection was called with ssl= and server_hostname
+    # Verify the ssl_sock was set to non-blocking
+    mock_ssl_sock.setblocking.assert_called_once_with(False)
+
+    # Verify asyncio streams were re-created
     mock_loop.create_connection.assert_awaited_once()
-    call_kwargs = mock_loop.create_connection.call_args[1]
-    assert call_kwargs["sock"] is mock_raw_sock
-    assert call_kwargs["ssl"] is mock_ssl_context
-    assert call_kwargs["server_hostname"] == "rdp.example.com"
 
     # Reader and writer should be replaced
     assert transport.reader is not mock_reader
