@@ -217,21 +217,14 @@ class NlaSecurityLayer(SecurityLayer):
         """Extract the server's TLS public key from the SSL socket.
 
         Returns the DER-encoded SubjectPublicKeyInfo from the server certificate.
-        The socket is accessed directly since we use a plain asyncio transport
-        over an already-wrapped SSLSocket (no ssl_object via get_extra_info).
+        After start_tls(), the transport is an SSLTransport that exposes
+        ssl_object via get_extra_info.
         """
         transport = tcp.writer.transport
-        # Try ssl_object first (works with asyncio SSLTransport)
         ssl_object = transport.get_extra_info("ssl_object")
-        if ssl_object is not None:
-            peer_cert_der = ssl_object.getpeercert(binary_form=True)
-        else:
-            # Fallback: get the socket directly (it's an SSLSocket)
-            sock = transport.get_extra_info("socket")
-            if sock is None or not hasattr(sock, "getpeercert"):
-                return b""
-            peer_cert_der = sock.getpeercert(binary_form=True)
-
+        if ssl_object is None:
+            return b""
+        peer_cert_der = ssl_object.getpeercert(binary_form=True)
         if peer_cert_der is None:
             return b""
 

@@ -118,66 +118,43 @@ async def test_close_closes_writer():
 
 @pytest.mark.asyncio
 async def test_upgrade_to_tls_replaces_reader():
-    """upgrade_to_tls() does blocking wrap_socket then re-creates asyncio streams."""
+    """upgrade_to_tls() uses start_tls and replaces the reader."""
     mock_reader = AsyncMock(spec=asyncio.StreamReader)
     mock_writer = MagicMock(spec=asyncio.StreamWriter)
-    mock_writer.close = MagicMock()
-    mock_writer.wait_closed = AsyncMock()
 
-    # Mock the underlying transport with socket info
+    # Mock the underlying transport and protocol
     mock_transport = MagicMock()
-    mock_sock = MagicMock()
-    mock_sock.fileno.return_value = 5
-    mock_sock.family = 2  # AF_INET
-    mock_sock.type = 1  # SOCK_STREAM
-    mock_transport.get_extra_info.return_value = mock_sock
+    mock_protocol = MagicMock()
+    mock_transport.get_protocol.return_value = mock_protocol
     mock_writer.transport = mock_transport
+    mock_writer._transport = mock_transport
+
+    # Mock the new TLS transport
+    mock_tls_transport = MagicMock()
+    mock_tls_transport.set_protocol = MagicMock()
 
     mock_ssl_context = MagicMock(spec=ssl.SSLContext)
-    mock_ssl_sock = MagicMock()
-    mock_ssl_context.wrap_socket.return_value = mock_ssl_sock
-
-    # Mock the dup'd raw socket
-    mock_raw_sock = MagicMock()
-
-    # Mock the new transport/protocol from create_connection
-    mock_new_transport = MagicMock()
-    mock_new_protocol = MagicMock()
 
     transport = TcpTransport(reader=mock_reader, writer=mock_writer)
 
-    with (
-        patch("arrdipi.transport.tcp.socket.fromfd", return_value=mock_raw_sock),
-        patch("asyncio.get_event_loop") as mock_get_loop,
-    ):
+    with patch("asyncio.get_event_loop") as mock_get_loop:
         mock_loop = MagicMock()
-        mock_loop.create_connection = AsyncMock(
-            return_value=(mock_new_transport, mock_new_protocol)
-        )
+        mock_loop.start_tls = AsyncMock(return_value=mock_tls_transport)
         mock_get_loop.return_value = mock_loop
 
         await transport.upgrade_to_tls(mock_ssl_context, "rdp.example.com")
 
-    # Verify the writer was closed to release the original transport
-    mock_writer.close.assert_called_once()
-    mock_writer.wait_closed.assert_awaited_once()
-
-    # Verify blocking TLS handshake was performed
-    mock_ssl_context.wrap_socket.assert_called_once_with(
-        mock_raw_sock,
+    # Verify start_tls was called with correct args
+    mock_loop.start_tls.assert_awaited_once_with(
+        mock_transport,
+        mock_protocol,
+        mock_ssl_context,
         server_hostname="rdp.example.com",
-        do_handshake_on_connect=True,
     )
 
-    # Verify the ssl_sock was set to non-blocking
-    mock_ssl_sock.setblocking.assert_called_once_with(False)
-
-    # Verify asyncio streams were re-created
-    mock_loop.create_connection.assert_awaited_once()
-
-    # Reader and writer should be replaced
+    # Reader should be replaced with a new StreamReader
     assert transport.reader is not mock_reader
-    assert transport.writer is not mock_writer
+    assert isinstance(transport.reader, asyncio.StreamReader)
 
 
 @pytest.mark.asyncio
