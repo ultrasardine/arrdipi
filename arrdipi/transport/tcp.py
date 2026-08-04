@@ -130,7 +130,7 @@ class TcpTransport:
             lambda: protocol,
             sock=raw_sock,
             ssl=ssl_context,
-            server_hostname=server_hostname or "",
+            server_hostname=server_hostname if server_hostname else "",
         )
         writer = asyncio.StreamWriter(new_transport, protocol, reader, loop)
 

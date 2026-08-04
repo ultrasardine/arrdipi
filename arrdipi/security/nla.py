@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 # Security header size for Enhanced Security: flags (u16 LE) + flagsHi (u16 LE)
 _SECURITY_HEADER_SIZE = 4
 
-
 @dataclass
 class NlaSecurityLayer(SecurityLayer):
     """NLA/CredSSP security layer using pyspnego for authentication.
@@ -81,21 +80,20 @@ class NlaSecurityLayer(SecurityLayer):
         await self._credssp_handshake(tcp)
 
     async def _upgrade_tls(self, tcp: TcpTransport) -> None:
-        """Upgrade TCP connection to TLS.
+        """Upgrade TCP connection to TLS for NLA/CredSSP.
 
-        OpenSSL 3.0 disabled SHA-1 for TLS signatures by default as a security
-        policy. Windows RDP servers (especially for CredSSP) often require
-        RSA+SHA1 signature algorithms in the TLS handshake. We set SECLEVEL=0
-        to re-enable these legacy algorithms for RDP compatibility.
+        Configures TLS 1.2 with relaxed security level for RDP compatibility.
+        Always sends server_hostname for SNI regardless of certificate
+        verification — the RDP server may require it to select the right cert.
         """
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        ctx.minimum_version = ssl.TLSVersion.TLSv1
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.maximum_version = ssl.TLSVersion.TLSv1_2
 
-        # OpenSSL 3.0 disables SHA-1 signatures by default. Windows RDP/CredSSP
-        # servers often require RSA+SHA1. Re-enable legacy algorithms.
+        # SECLEVEL=0 allows legacy cipher strengths and SHA-1 signature
+        # algorithms needed for older Windows RDP servers.
         ctx.set_ciphers("DEFAULT:!aNULL:!eNULL:@SECLEVEL=0")
 
         if self.verify_cert:
@@ -105,8 +103,9 @@ class NlaSecurityLayer(SecurityLayer):
         else:
             logger.warning("TLS certificate verification disabled for NLA")
 
-        hostname = self.server_hostname if self.verify_cert else None
-        await tcp.upgrade_to_tls(ctx, server_hostname=hostname)
+        # Always pass hostname for SNI — server may need it even without
+        # certificate verification (e.g. to select the right certificate).
+        await tcp.upgrade_to_tls(ctx, server_hostname=self.server_hostname or None)
 
     async def _credssp_handshake(self, tcp: TcpTransport) -> None:
         """Perform CredSSP handshake per [MS-CSSP] Section 3.1.5.
