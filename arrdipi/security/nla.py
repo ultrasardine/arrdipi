@@ -81,15 +81,31 @@ class NlaSecurityLayer(SecurityLayer):
         await self._credssp_handshake(tcp)
 
     async def _upgrade_tls(self, tcp: TcpTransport) -> None:
-        """Upgrade TCP connection to TLS."""
-        ctx = ssl.create_default_context()
+        """Upgrade TCP connection to TLS.
 
-        if not self.verify_cert:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+        OpenSSL 3.0 disabled SHA-1 for TLS signatures by default as a security
+        policy. Windows RDP servers (especially for CredSSP) often require
+        RSA+SHA1 signature algorithms in the TLS handshake. We set SECLEVEL=0
+        to re-enable these legacy algorithms for RDP compatibility.
+        """
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = ssl.TLSVersion.TLSv1
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+
+        # OpenSSL 3.0 disables SHA-1 signatures by default. Windows RDP/CredSSP
+        # servers often require RSA+SHA1. Re-enable legacy algorithms.
+        ctx.set_ciphers("DEFAULT:!aNULL:!eNULL:@SECLEVEL=0")
+
+        if self.verify_cert:
+            ctx.load_default_certs()
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+        else:
             logger.warning("TLS certificate verification disabled for NLA")
 
-        hostname = self.server_hostname or ""
+        hostname = self.server_hostname if self.verify_cert else None
         await tcp.upgrade_to_tls(ctx, server_hostname=hostname)
 
     async def _credssp_handshake(self, tcp: TcpTransport) -> None:
