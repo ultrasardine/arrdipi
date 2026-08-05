@@ -103,9 +103,12 @@ class NlaSecurityLayer(SecurityLayer):
         else:
             logger.warning("TLS certificate verification disabled for NLA")
 
-        # Always pass hostname for SNI — server may need it even without
-        # certificate verification (e.g. to select the right certificate).
-        await tcp.upgrade_to_tls(ctx, server_hostname=self.server_hostname or None)
+        # Only pass server_hostname for SNI when verifying certificates.
+        # When connecting through tunnels (e.g. SSM), the host is "localhost"
+        # which would cause the RDP server to reject the handshake (it has no
+        # certificate matching "localhost").
+        hostname = self.server_hostname if self.verify_cert else None
+        await tcp.upgrade_to_tls(ctx, server_hostname=hostname)
 
     async def _credssp_handshake(self, tcp: TcpTransport) -> None:
         """Perform CredSSP handshake per [MS-CSSP] Section 3.1.5.
