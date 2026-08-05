@@ -380,32 +380,31 @@ class NlaSecurityLayer(SecurityLayer):
         return data
 
     def wrap_pdu(self, data: bytes) -> bytes:
-        """Prepend a 4-byte security header with flags=0, flagsHi=0.
+        """Identity for Enhanced Security — no security header on regular PDUs.
 
-        For Enhanced Security, the security header contains only flags
-        (no MAC or encrypted payload).
+        Per MS-RDPBCGR 5.4.1, when Enhanced Security is in effect, regular
+        PDUs (Demand Active, Confirm Active, finalization, data) do NOT have
+        a security header. Only Client Info (SEC_INFO_PKT) and Licensing
+        (SEC_LICENSE_PKT) PDUs include one, handled explicitly by those phases.
 
         Args:
             data: PDU payload bytes.
 
         Returns:
-            4-byte security header + payload.
+            The same data unchanged.
         """
-        header = struct.pack("<HH", 0, 0)
-        return header + data
+        return data
 
     def unwrap_pdu(self, data: bytes) -> tuple[bytes, int]:
-        """Strip the 4-byte security header and return payload with flags.
+        """Identity for Enhanced Security — no security header on regular PDUs.
 
         Args:
-            data: Raw bytes including security header + payload.
+            data: Raw PDU bytes (no security header present).
 
         Returns:
-            Tuple of (payload bytes after header, security flags as int).
+            Tuple of (data unchanged, flags=0).
         """
-        flags = struct.unpack_from("<H", data, 0)[0]
-        payload = data[_SECURITY_HEADER_SIZE:]
-        return payload, flags
+        return data, 0
 
     @property
     def is_enhanced(self) -> bool:

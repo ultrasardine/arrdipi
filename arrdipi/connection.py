@@ -464,9 +464,9 @@ class ConnectionSequence:
             while True:
                 channel_id, data = await self._mcs.recv_pdu()  # type: ignore[union-attr]
                 if channel_id == io_channel_id:
-                    # Strip security header to get licensing data
-                    payload, flags = self._security.unwrap_pdu(data)  # type: ignore[union-attr]
-                    return payload
+                    # Licensing PDUs always have a 4-byte security header
+                    # (flags=SEC_LICENSE_PKT), even with Enhanced Security
+                    return data[4:]  # Strip security header, return licensing body
 
         async def send_licensing(data: bytes) -> None:
             """Send a licensing PDU on the I/O channel."""
@@ -537,12 +537,9 @@ class ConnectionSequence:
         )
         full_pdu = share_control_header + confirm_payload
 
-        # Wrap with security header and send
-        if self._security.is_enhanced:
-            sec_header = struct.pack("<HH", 0, 0)
-            pdu_data = sec_header + full_pdu
-        else:
-            pdu_data = self._security.wrap_pdu(full_pdu)
+        # For Enhanced Security: no security header on Confirm Active
+        # For Standard Security: wrap_pdu adds encryption + MAC
+        pdu_data = self._security.wrap_pdu(full_pdu)
 
         await self._mcs.send_to_channel(io_channel_id, pdu_data)
 
@@ -716,12 +713,9 @@ class ConnectionSequence:
 
         full_pdu = share_control_header + inner_data
 
-        # Wrap with security header
-        if self._security.is_enhanced:
-            sec_header = struct.pack("<HH", 0, 0)
-            pdu_data = sec_header + full_pdu
-        else:
-            pdu_data = self._security.wrap_pdu(full_pdu)
+        # For Enhanced Security: no security header (wrap_pdu is no-op)
+        # For Standard Security: wrap_pdu adds encryption + MAC
+        pdu_data = self._security.wrap_pdu(full_pdu)
 
         await self._mcs.send_to_channel(channel_id, pdu_data)
 

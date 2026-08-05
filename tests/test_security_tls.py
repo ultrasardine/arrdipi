@@ -108,50 +108,26 @@ class TestTlsSecurityLayerEncryptDecrypt:
 
 
 class TestTlsSecurityLayerWrapUnwrap:
-    """Tests for wrap_pdu/unwrap_pdu security header handling."""
+    """Tests for wrap_pdu/unwrap_pdu — identity for Enhanced Security.
 
-    def test_wrap_pdu_adds_4_byte_header(self):
-        """wrap_pdu() prepends a 4-byte security header."""
+    Per MS-RDPBCGR 5.4.1, Enhanced Security (TLS/NLA) does not add security
+    headers to regular PDUs. Only Client Info and Licensing PDUs include their
+    own security headers, handled explicitly by those phases.
+    """
+
+    def test_wrap_pdu_is_identity(self):
+        """wrap_pdu() returns data unchanged for Enhanced Security."""
         layer = TlsSecurityLayer()
         payload = b"\x01\x02\x03\x04"
-        wrapped = layer.wrap_pdu(payload)
+        assert layer.wrap_pdu(payload) == payload
 
-        assert len(wrapped) == 4 + len(payload)
-        # Header should be flags=0, flagsHi=0 (4 zero bytes)
-        assert wrapped[:4] == b"\x00\x00\x00\x00"
-        assert wrapped[4:] == payload
-
-    def test_wrap_pdu_header_is_le_encoded(self):
-        """wrap_pdu() header is two u16 LE values (flags=0, flagsHi=0)."""
+    def test_unwrap_pdu_is_identity(self):
+        """unwrap_pdu() returns data unchanged for Enhanced Security."""
         layer = TlsSecurityLayer()
-        wrapped = layer.wrap_pdu(b"test")
-
-        flags = struct.unpack_from("<H", wrapped, 0)[0]
-        flags_hi = struct.unpack_from("<H", wrapped, 2)[0]
+        data = b"\x05\x06\x07\x08\x09\x0a"
+        result_payload, flags = layer.unwrap_pdu(data)
+        assert result_payload == data
         assert flags == 0
-        assert flags_hi == 0
-
-    def test_unwrap_pdu_strips_4_byte_header(self):
-        """unwrap_pdu() removes the 4-byte security header."""
-        layer = TlsSecurityLayer()
-        payload = b"\x05\x06\x07\x08\x09\x0a"
-        # Construct a message with header (flags=0, flagsHi=0) + payload
-        message = struct.pack("<HH", 0, 0) + payload
-
-        result_payload, flags = layer.unwrap_pdu(message)
-        assert result_payload == payload
-        assert flags == 0
-
-    def test_unwrap_pdu_extracts_flags(self):
-        """unwrap_pdu() returns the flags value from the header."""
-        layer = TlsSecurityLayer()
-        payload = b"\xaa\xbb"
-        # Set flags=0x0008 (SEC_ENCRYPT), flagsHi=0
-        message = struct.pack("<HH", 0x0008, 0) + payload
-
-        result_payload, flags = layer.unwrap_pdu(message)
-        assert result_payload == payload
-        assert flags == 0x0008
 
     def test_wrap_unwrap_round_trip(self):
         """wrap_pdu then unwrap_pdu returns the original payload."""
@@ -167,15 +143,12 @@ class TestTlsSecurityLayerWrapUnwrap:
     def test_wrap_pdu_empty_payload(self):
         """wrap_pdu() works with empty payload."""
         layer = TlsSecurityLayer()
-        wrapped = layer.wrap_pdu(b"")
-        assert len(wrapped) == 4
-        assert wrapped == b"\x00\x00\x00\x00"
+        assert layer.wrap_pdu(b"") == b""
 
-    def test_unwrap_pdu_header_only(self):
-        """unwrap_pdu() with only header returns empty payload."""
+    def test_unwrap_pdu_empty(self):
+        """unwrap_pdu() handles empty data."""
         layer = TlsSecurityLayer()
-        message = struct.pack("<HH", 0, 0)
-        payload, flags = layer.unwrap_pdu(message)
+        payload, flags = layer.unwrap_pdu(b"")
         assert payload == b""
         assert flags == 0
 

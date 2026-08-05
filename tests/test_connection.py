@@ -500,9 +500,8 @@ class TestPhase9CapabilitiesExchange:
         demand_payload = _build_demand_active_pdu()
         share_control = _wrap_in_share_control(0x0001, 1003, demand_payload)
 
-        # Wrap in security header
-        sec_header = struct.pack("<HH", 0, 0)
-        wrapped = sec_header + share_control
+        # For Enhanced Security, no security header on Demand Active
+        wrapped = share_control
 
         mock_mcs = MagicMock()
         mock_mcs.recv_pdu = AsyncMock(return_value=(1003, wrapped))
@@ -550,12 +549,11 @@ class TestPhase10ConnectionFinalization:
             number_entries=0, total_num_entries=0, map_flags=0x0003, entry_size=0x0004
         ).serialize()
 
-        # Wrap each in ShareData + ShareControl + security header
+        # Wrap each in ShareData + ShareControl (no security header for Enhanced Security)
         def wrap_server_pdu(pdu_type2: int, payload: bytes) -> bytes:
             share_data = _wrap_in_share_data(pdu_type2, payload)
             share_control = _wrap_in_share_control(0x0007, 1003, share_data)
-            sec_header = struct.pack("<HH", 0, 0)
-            return sec_header + share_control
+            return share_control
 
         server_pdus = [
             (1003, wrap_server_pdu(0x1F, sync_data)),

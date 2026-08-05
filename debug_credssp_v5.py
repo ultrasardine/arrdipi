@@ -21,7 +21,7 @@ from arrdipi.pdu.types import NegotiationProtocol
 from arrdipi.pdu.credssp import TSRequest
 
 HOST = "localhost"
-PORT = 13391
+PORT = 13390
 
 # CredSSP v5+ magic strings (MS-CSSP 3.1.5.1.2)
 CLIENT_SERVER_HASH_MAGIC = b"CredSSP Client-To-Server Binding Hash\0"
@@ -194,6 +194,20 @@ async def main():
             await tcp.send(ts_request.serialize())
             print(f"   ✓ Credentials sent! ({len(encrypted_creds)} bytes encrypted)")
             print(f"\n   *** CredSSP HANDSHAKE COMPLETE! ***")
+            
+            # Test if connection stays alive for the next RDP phase
+            print(f"\n8. Testing if connection stays alive...")
+            await asyncio.sleep(0.5)
+            try:
+                data = await asyncio.wait_for(tcp.reader.read(4), timeout=3)
+                if data:
+                    print(f"   ✓ Server sent data: {len(data)} bytes - {data.hex()}")
+                else:
+                    print(f"   ✗ Server sent EOF (0 bytes) - connection CLOSED!")
+            except asyncio.TimeoutError:
+                print(f"   ✓ No data (server waiting for client) - connection ALIVE!")
+            except Exception as e:
+                print(f"   ✗ Read error: {type(e).__name__}: {e}")
             
     except asyncio.TimeoutError:
         print(f"   ✗ Timeout - server closed connection (TLS alert)")

@@ -253,19 +253,19 @@ class TestNlaSecurityLayer:
         assert nla.decrypt(data) == data
 
     def test_wrap_pdu(self) -> None:
-        """wrap_pdu() prepends 4-byte zero header."""
+        """wrap_pdu() is identity for Enhanced Security (no security header)."""
         nla = NlaSecurityLayer()
         payload = b"\xAA\xBB\xCC"
         wrapped = nla.wrap_pdu(payload)
-        assert wrapped == b"\x00\x00\x00\x00\xAA\xBB\xCC"
+        assert wrapped == b"\xAA\xBB\xCC"
 
     def test_unwrap_pdu(self) -> None:
-        """unwrap_pdu() strips 4-byte header and returns flags."""
+        """unwrap_pdu() is identity for Enhanced Security (no security header)."""
         nla = NlaSecurityLayer()
-        data = b"\x01\x00\x00\x00\xAA\xBB\xCC"
+        data = b"\xAA\xBB\xCC"
         payload, flags = nla.unwrap_pdu(data)
         assert payload == b"\xAA\xBB\xCC"
-        assert flags == 1
+        assert flags == 0
 
     def test_is_enhanced(self) -> None:
         """NLA is Enhanced Security."""

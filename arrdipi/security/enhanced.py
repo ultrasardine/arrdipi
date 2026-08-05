@@ -91,37 +91,30 @@ class TlsSecurityLayer(SecurityLayer):
         return data
 
     def wrap_pdu(self, data: bytes) -> bytes:
-        """Prepend a 4-byte security header with flags=0, flagsHi=0.
+        """Identity for Enhanced Security — no security header on regular PDUs.
 
-        For Enhanced Security, the security header contains only flags
-        (no MAC or encrypted payload). The header is:
-        - flags (u16 LE): 0
-        - flagsHi (u16 LE): 0
+        Per MS-RDPBCGR 5.4.1, when Enhanced Security is in effect, regular
+        PDUs do NOT have a security header. Only Client Info and Licensing
+        PDUs include one, handled explicitly by those phases.
 
         Args:
             data: PDU payload bytes.
 
         Returns:
-            4-byte security header + payload.
+            The same data unchanged.
         """
-        header = struct.pack("<HH", 0, 0)
-        return header + data
+        return data
 
     def unwrap_pdu(self, data: bytes) -> tuple[bytes, int]:
-        """Strip the 4-byte security header and return payload with flags.
-
-        Reads the flags field from the first 2 bytes (u16 LE) and returns
-        the remaining data as the payload.
+        """Identity for Enhanced Security — no security header on regular PDUs.
 
         Args:
-            data: Raw bytes including security header + payload.
+            data: Raw PDU bytes (no security header present).
 
         Returns:
-            Tuple of (payload bytes after header, security flags as int).
+            Tuple of (data unchanged, flags=0).
         """
-        flags = struct.unpack_from("<H", data, 0)[0]
-        payload = data[_SECURITY_HEADER_SIZE:]
-        return payload, flags
+        return data, 0
 
     @property
     def is_enhanced(self) -> bool:
