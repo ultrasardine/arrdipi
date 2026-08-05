@@ -296,6 +296,93 @@ class TestNlaEstablish:
             mock_tls.assert_called_once_with(tcp)
             mock_credssp.assert_called_once_with(tcp)
 
+
+class TestComputePubKeyAuth:
+    """Tests for _compute_pub_key_auth() version-aware computation."""
+
+    def test_version_5_uses_hash(self) -> None:
+        """CredSSP v5+ uses SHA256(magic || nonce || pubkey) format."""
+        import hashlib
+        from arrdipi.security.nla import _CLIENT_SERVER_HASH_MAGIC
+
+        nla = NlaSecurityLayer()
+        server_pub_key = b"\x00" * 64
+        client_nonce = b"\x42" * 32
+
+        # Mock spnego context
+        mock_spnego = MagicMock()
+        mock_wrap_result = MagicMock()
+        mock_wrap_result.data = b"encrypted_hash"
+        mock_spnego.wrap = MagicMock(return_value=mock_wrap_result)
+
+        result = nla._compute_pub_key_auth(
+            mock_spnego, server_pub_key, client_nonce, version=6
+        )
+
+        # Verify the hash was computed correctly
+        expected_input = _CLIENT_SERVER_HASH_MAGIC + client_nonce + server_pub_key
+        expected_hash = hashlib.sha256(expected_input).digest()
+        mock_spnego.wrap.assert_called_once_with(expected_hash)
+        assert result == b"encrypted_hash"
+
+    def test_version_5_boundary(self) -> None:
+        """Version 5 exactly uses hash format."""
+        import hashlib
+        from arrdipi.security.nla import _CLIENT_SERVER_HASH_MAGIC
+
+        nla = NlaSecurityLayer()
+        server_pub_key = b"pubkey"
+        client_nonce = b"n" * 32
+
+        mock_spnego = MagicMock()
+        mock_wrap_result = MagicMock()
+        mock_wrap_result.data = b"result"
+        mock_spnego.wrap = MagicMock(return_value=mock_wrap_result)
+
+        nla._compute_pub_key_auth(mock_spnego, server_pub_key, client_nonce, version=5)
+
+        # Should use hash format for v5
+        expected_input = _CLIENT_SERVER_HASH_MAGIC + client_nonce + server_pub_key
+        expected_hash = hashlib.sha256(expected_input).digest()
+        mock_spnego.wrap.assert_called_once_with(expected_hash)
+
+    def test_version_4_uses_raw_pubkey(self) -> None:
+        """CredSSP v4 and below uses raw public key format."""
+        nla = NlaSecurityLayer()
+        server_pub_key = b"raw_public_key_bytes"
+        client_nonce = b"nonce"
+
+        mock_spnego = MagicMock()
+        mock_wrap_result = MagicMock()
+        mock_wrap_result.data = b"encrypted_pubkey"
+        mock_spnego.wrap = MagicMock(return_value=mock_wrap_result)
+
+        result = nla._compute_pub_key_auth(
+            mock_spnego, server_pub_key, client_nonce, version=4
+        )
+
+        # Should wrap raw public key for v4
+        mock_spnego.wrap.assert_called_once_with(server_pub_key)
+        assert result == b"encrypted_pubkey"
+
+    def test_version_2_uses_raw_pubkey(self) -> None:
+        """CredSSP v2 uses raw public key format."""
+        nla = NlaSecurityLayer()
+        server_pub_key = b"pubkey_v2"
+        client_nonce = b"unused"
+
+        mock_spnego = MagicMock()
+        mock_wrap_result = MagicMock()
+        mock_wrap_result.data = b"encrypted"
+        mock_spnego.wrap = MagicMock(return_value=mock_wrap_result)
+
+        nla._compute_pub_key_auth(mock_spnego, server_pub_key, client_nonce, version=2)
+
+        mock_spnego.wrap.assert_called_once_with(server_pub_key)
+
+
+class TestNlaEstablishErrors:
+
     @pytest.mark.asyncio
     async def test_authentication_error_on_server_error_code(self) -> None:
         """AuthenticationError raised when server sends error code."""
@@ -324,6 +411,7 @@ class TestNlaEstablish:
         with (
             patch.object(nla, "_upgrade_tls", new_callable=AsyncMock),
             patch.object(nla, "_get_server_public_key", return_value=b"\x00" * 32),
+            patch.object(nla, "_get_channel_bindings", return_value=None),
             patch("arrdipi.security.nla.spnego.client", return_value=mock_spnego),
         ):
             with pytest.raises(AuthenticationError) as exc_info:
@@ -344,6 +432,7 @@ class TestNlaEstablish:
         with (
             patch.object(nla, "_upgrade_tls", new_callable=AsyncMock),
             patch.object(nla, "_get_server_public_key", return_value=b"\x00" * 32),
+            patch.object(nla, "_get_channel_bindings", return_value=None),
             patch(
                 "arrdipi.security.nla.spnego.client",
                 side_effect=Exception("Kerberos not available"),
@@ -379,6 +468,7 @@ class TestNlaEstablish:
         with (
             patch.object(nla, "_upgrade_tls", new_callable=AsyncMock),
             patch.object(nla, "_get_server_public_key", return_value=b"\x00" * 32),
+            patch.object(nla, "_get_channel_bindings", return_value=None),
             patch("arrdipi.security.nla.spnego.client", return_value=mock_spnego),
         ):
             with pytest.raises(NegotiationError, match="SPNEGO token exchange failed"):
@@ -406,6 +496,7 @@ class TestNlaEstablish:
         with (
             patch.object(nla, "_upgrade_tls", new_callable=AsyncMock),
             patch.object(nla, "_get_server_public_key", return_value=b"\x00" * 32),
+            patch.object(nla, "_get_channel_bindings", return_value=None),
             patch("arrdipi.security.nla.spnego.client", return_value=mock_spnego),
         ):
             with pytest.raises(NegotiationError, match="missing SPNEGO token"):

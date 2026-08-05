@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING
 
 import spnego
 
+# CredSSP version 5+ magic strings for pubKeyAuth hash computation (MS-CSSP 3.1.5.1.2)
+_CLIENT_SERVER_HASH_MAGIC = b"CredSSP Client-To-Server Binding Hash\0"
+_SERVER_CLIENT_HASH_MAGIC = b"CredSSP Server-To-Client Binding Hash\0"
+
 from arrdipi.errors import AuthenticationError, NegotiationError
 from arrdipi.pdu.credssp import (
     TSCredentials,
@@ -115,6 +119,9 @@ class NlaSecurityLayer(SecurityLayer):
             AuthenticationError: On invalid credentials (AC 5).
             NegotiationError: On SPNEGO/Kerberos failure (AC 6).
         """
+        # Build channel bindings from the server's TLS certificate (RFC 5929)
+        channel_bindings = self._get_channel_bindings(tcp)
+
         # Create SPNEGO client context
         try:
             spnego_client = spnego.client(
@@ -123,6 +130,7 @@ class NlaSecurityLayer(SecurityLayer):
                 hostname=self.server_hostname,
                 service="TERMSRV",
                 protocol=self.protocol,
+                channel_bindings=channel_bindings,
             )
         except Exception as e:
             raise NegotiationError(f"Failed to create SPNEGO context: {e}") from e
@@ -148,10 +156,15 @@ class NlaSecurityLayer(SecurityLayer):
         await tcp.send(ts_request.serialize())
 
         # Phase 2: Exchange tokens until SPNEGO completes
+        server_version = 6  # Default, will be updated from server response
         while not spnego_client.complete:
             # Receive server response
             response_data = await self._recv_tsrequest(tcp)
             server_ts_request = TSRequest.parse(response_data)
+
+            # Track server's CredSSP version for pubKeyAuth computation
+            server_version = server_ts_request.version
+            logger.debug(f"Server CredSSP version: {server_version}")
 
             # Check for error code from server
             if server_ts_request.error_code:
@@ -176,10 +189,14 @@ class NlaSecurityLayer(SecurityLayer):
 
             if spnego_client.complete:
                 # Authentication complete - send pubKeyAuth
-                encrypted_pub_key = spnego_client.wrap(server_pub_key).data
+                # Use the negotiated version (min of client and server versions)
+                negotiated_version = min(6, server_version)  # We support up to v6
+                pub_key_auth = self._compute_pub_key_auth(
+                    spnego_client, server_pub_key, client_nonce, negotiated_version
+                )
                 ts_request = TSRequest(
                     nego_tokens=[out_token] if out_token else [],
-                    pub_key_auth=encrypted_pub_key,
+                    pub_key_auth=pub_key_auth,
                     client_nonce=client_nonce,
                 )
             else:
@@ -206,9 +223,9 @@ class NlaSecurityLayer(SecurityLayer):
     def _get_server_public_key(self, tcp: TcpTransport) -> bytes:
         """Extract the server's TLS public key from the SSL socket.
 
-        Returns the DER-encoded SubjectPublicKeyInfo from the server certificate.
-        After start_tls(), the transport is an SSLTransport that exposes
-        ssl_object via get_extra_info.
+        Returns the DER-encoded PKCS1 RSA public key from the server certificate.
+        Per MS-CSSP and pyspnego, this is the raw RSA public key (PKCS1 format),
+        NOT SubjectPublicKeyInfo which includes the algorithm identifier.
         """
         transport = tcp.writer.transport
         ssl_object = transport.get_extra_info("ssl_object")
@@ -218,7 +235,7 @@ class NlaSecurityLayer(SecurityLayer):
         if peer_cert_der is None:
             return b""
 
-        # Extract SubjectPublicKeyInfo from the certificate
+        # Extract public key in PKCS1 (raw RSA) format per MS-CSSP
         from cryptography import x509
         from cryptography.hazmat.primitives.serialization import (
             Encoding,
@@ -228,8 +245,63 @@ class NlaSecurityLayer(SecurityLayer):
         cert = x509.load_der_x509_certificate(peer_cert_der)
         return cert.public_key().public_bytes(
             encoding=Encoding.DER,
-            format=PublicFormat.SubjectPublicKeyInfo,
+            format=PublicFormat.PKCS1,
         )
+
+    def _get_channel_bindings(self, tcp: TcpTransport) -> spnego.channel_bindings.GssChannelBindings | None:
+        """Build TLS channel bindings per RFC 5929 tls-server-end-point.
+
+        The application_data is: "tls-server-end-point:" + SHA256(certificate_der).
+        Returns None if the TLS certificate cannot be obtained.
+        """
+        transport = tcp.writer.transport
+        ssl_object = transport.get_extra_info("ssl_object")
+        if ssl_object is None:
+            return None
+        peer_cert_der = ssl_object.getpeercert(binary_form=True)
+        if peer_cert_der is None:
+            return None
+
+        cert_hash = hashlib.sha256(peer_cert_der).digest()
+        application_data = b"tls-server-end-point:" + cert_hash
+        return spnego.channel_bindings.GssChannelBindings(
+            application_data=application_data,
+        )
+
+    def _compute_pub_key_auth(
+        self,
+        spnego_client: spnego.ContextProxy,
+        server_pub_key: bytes,
+        client_nonce: bytes,
+        version: int,
+    ) -> bytes:
+        """Compute the pubKeyAuth value per MS-CSSP section 3.1.5.1.2.
+
+        For CredSSP version 5+, pubKeyAuth is the encrypted SHA256 hash of:
+            ClientServerHashMagic || Nonce || PublicKey
+
+        For CredSSP version 2-4, pubKeyAuth is just the encrypted public key.
+
+        Args:
+            spnego_client: The authenticated SPNEGO context for encryption.
+            server_pub_key: Server's DER-encoded PKCS1 RSA public key.
+            client_nonce: 32-byte random nonce sent in TSRequest.
+            version: Negotiated CredSSP version.
+
+        Returns:
+            Encrypted pubKeyAuth bytes.
+        """
+        if version >= 5:
+            # CredSSP v5+: hash-based binding
+            # pubKeyAuth = ENCRYPT(SHA256(magic || nonce || pubkey))
+            hash_input = _CLIENT_SERVER_HASH_MAGIC + client_nonce + server_pub_key
+            hash_value = hashlib.sha256(hash_input).digest()
+            logger.debug(f"pubKeyAuth v{version}: hash of {len(hash_input)} bytes")
+            return spnego_client.wrap(hash_value).data
+        else:
+            # CredSSP v2-4: direct public key binding
+            logger.debug(f"pubKeyAuth v{version}: raw pubkey {len(server_pub_key)} bytes")
+            return spnego_client.wrap(server_pub_key).data
 
     async def _recv_tsrequest(self, tcp: TcpTransport) -> bytes:
         """Receive a complete TSRequest from the transport.
