@@ -407,11 +407,12 @@ def _build_attach_user_request() -> bytes:
 def _parse_attach_user_confirm(data: bytes) -> int:
     """Parse an MCS Attach User Confirm PDU (PER).
 
-    Type byte: 0x2E (base 0x2C with result in low 2 bits)
-    user channel ID: u16 (+ 1001 base) — only present if result == 0
-
-    The PER encoding places the result enumeration in the low 2 bits
-    of the type byte. For success (result=0), the user channel ID follows.
+    PER encoding per T.125 / MS-RDPBCGR 2.2.1.7:
+    - Byte 0 bits 7-2: choice index (11 = AttachUserConfirm)
+    - Byte 0 bit 1: optional initiator (userId) field present
+    - Byte 0 bit 0: MSB of result enumeration
+    - Byte 1 bits 7-4: remaining bits of result enum (result is 4 bits total
+      but only the first bit + upper nibble of next byte)
 
     Returns:
         The user channel ID.
@@ -419,31 +420,41 @@ def _parse_attach_user_confirm(data: bytes) -> int:
     Raises:
         ValueError: If the result is not successful or data is malformed.
     """
-    if len(data) < 1:
+    if len(data) < 2:
         msg = "MCS Attach User Confirm: data too short"
         raise ValueError(msg)
 
-    offset = 0
-    type_byte = data[offset]
-    offset += 1
+    type_byte = data[0]
 
-    # The type byte for Attach User Confirm has base 0x2C
-    # with result in the low 2 bits
-    if (type_byte & 0xFC) != 0x2C:
-        msg = f"MCS Attach User Confirm: unexpected type byte 0x{type_byte:02X}"
+    # Verify choice index (top 6 bits should be 11 = 0x2C >> 2... actually 11 << 2 = 0x2C)
+    choice = (type_byte >> 2) & 0x3F
+    if choice != 11:
+        msg = f"MCS Attach User Confirm: unexpected choice {choice} (expected 11)"
         raise ValueError(msg)
 
-    # Result is encoded in the 2 LSBs of the type byte for PER
-    result = type_byte & 0x03
+    # Bit 1: optional initiator present flag
+    initiator_present = (type_byte >> 1) & 0x01
+
+    # Result: bit 0 of type_byte is MSB, upper nibble of byte 1 is the rest
+    # Per PER ENUMERATED encoding with small range
+    result_bit0 = type_byte & 0x01
+    result_rest = (data[1] >> 4) & 0x0F
+    result = (result_bit0 << 4) | result_rest
+
     if result != 0:
         msg = f"MCS Attach User Confirm: result={result} (expected 0=rt-successful)"
         raise ValueError(msg)
 
-    # User channel ID (u16, value is channel_id - 1001)
-    if offset + 2 > len(data):
+    # User channel ID (u16 big-endian, value is channel_id - 1001)
+    if not initiator_present:
+        msg = "MCS Attach User Confirm: initiator field not present"
+        raise ValueError(msg)
+
+    if len(data) < 4:
         msg = "MCS Attach User Confirm: data too short for user channel ID"
         raise ValueError(msg)
-    user_id_encoded, offset = _per_decode_u16(data, offset)
+
+    user_id_encoded = struct.unpack_from(">H", data, 2)[0]
     return user_id_encoded + MCS_USER_CHANNEL_BASE
 
 
@@ -464,11 +475,14 @@ def _build_channel_join_request(user_channel_id: int, channel_id: int) -> bytes:
 def _parse_channel_join_confirm(data: bytes) -> tuple[int, int]:
     """Parse an MCS Channel Join Confirm PDU (PER).
 
-    Type byte: 0x3E (with result in low bits)
-    result: ENUMERATED (in type byte low bits)
-    user channel ID: u16 (+ 1001 base)
-    requested channel ID: u16
-    channel ID: u16
+    PER encoding per T.125 / MS-RDPBCGR 2.2.1.9:
+    - Byte 0 bits 7-2: choice index (15 = ChannelJoinConfirm)
+    - Byte 0 bit 1: optional channelId field present
+    - Byte 0 bit 0: MSB of result enumeration
+    - Byte 1 bits 7-4: remaining bits of result enum
+    - Bytes 2-3: initiator (userId - 1001, big-endian)
+    - Bytes 4-5: requested channel ID (big-endian)
+    - Bytes 6-7: channelId (big-endian) — only if present flag set
 
     Returns:
         Tuple of (result, channel_id).
@@ -476,29 +490,33 @@ def _parse_channel_join_confirm(data: bytes) -> tuple[int, int]:
     Raises:
         ValueError: If the data is too short.
     """
-    if len(data) < 7:
+    if len(data) < 6:
         msg = "MCS Channel Join Confirm: data too short"
         raise ValueError(msg)
 
-    offset = 0
-    type_byte = data[offset]
-    offset += 1
+    type_byte = data[0]
 
-    # Result is in the 2 LSBs of the type byte
-    # Type byte base for Channel Join Confirm is 0x3E
-    # But with result bits: 0x3E | (result << 0) — actually result is in bits 1:0
-    # The actual encoding: type_byte & 0xFC should be 0x3C
-    result = type_byte & 0x03
+    # Verify choice index (top 6 bits should be 15)
+    choice = (type_byte >> 2) & 0x3F
+    if choice != 15:
+        msg = f"MCS Channel Join Confirm: unexpected choice {choice} (expected 15)"
+        raise ValueError(msg)
 
-    # user channel ID
-    _user_id, offset = _per_decode_u16(data, offset)
+    # Bit 1: optional channelId present flag
+    channel_id_present = (type_byte >> 1) & 0x01
 
-    # requested channel ID
-    _requested_channel_id, offset = _per_decode_u16(data, offset)
+    # Result: bit 0 of type_byte is MSB, upper nibble of byte 1 is the rest
+    result_bit0 = type_byte & 0x01
+    result_rest = (data[1] >> 4) & 0x0F
+    result = (result_bit0 << 4) | result_rest
 
-    # actual channel ID (only present if result == 0)
-    if result == 0 and offset + 2 <= len(data):
-        channel_id, offset = _per_decode_u16(data, offset)
+    # Bytes 2-3: initiator (userId - 1001)
+    # Bytes 4-5: requested channel ID
+    _requested_channel_id = struct.unpack_from(">H", data, 4)[0]
+
+    # Bytes 6-7: actual channel ID (only if present flag set and result == 0)
+    if channel_id_present and result == 0 and len(data) >= 8:
+        channel_id = struct.unpack_from(">H", data, 6)[0]
     else:
         channel_id = _requested_channel_id
 

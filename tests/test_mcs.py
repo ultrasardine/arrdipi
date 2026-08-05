@@ -261,20 +261,24 @@ class TestAttachUserConfirm:
 
     def test_parse_success(self):
         """Parse a successful Attach User Confirm returns user channel ID."""
-        # Type byte: 0x2E (base 0x2C | result 0x00 in bits 1:0 = success)
-        # Actually: 0x2E = 0x2C | 0x02? Let's check the encoding.
-        # The PER encoding: type_byte = 0x2C | (result << 0)
-        # For result=0: type_byte & 0x03 == 0, and type_byte & 0xFC == 0x2C
-        # So type_byte = 0x2C for success
-        # User channel ID: 5 (encoded as 5, actual = 5 + 1001 = 1006)
-        data = b"\x2c" + struct.pack(">H", 5)  # user_id = 5 -> channel 1006
+        # PER encoding: byte0 = (choice=11 << 2) | (present=1 << 1) | result_bit0=0 = 0x2E
+        # byte1 = result_rest(0) << 4 = 0x00
+        # bytes 2-3 = user channel ID (big-endian)
+        # Example from real server: 2e 00 00 08 -> userId=8, channel=1009
+        data = b"\x2e\x00" + struct.pack(">H", 5)  # user_id = 5 -> channel 1006
         result = _parse_attach_user_confirm(data)
         assert result == 1006
 
     def test_parse_failure(self):
         """Parse a failed Attach User Confirm raises ValueError."""
-        # result = 1 (failure): type_byte = 0x2C | 0x01 = 0x2D
-        data = b"\x2d" + struct.pack(">H", 5)
+        # result=1: bit0=1 in type_byte -> 0x2E | 0x01 = 0x2F
+        # result_rest in byte1 = 0 << 4 = 0x00
+        # Full result = (1 << 4) | 0 = 16... actually let's use result=1 properly:
+        # result=1 in 5-bit encoding: bit0=0, rest=0001 (in upper nibble of byte1)
+        # type_byte = 0x2E | 0 = 0x2E, byte1 = 0x10 (rest=0001 << 4)
+        # Hmm, combined = (0 << 4) | 1 = 1. So: type_byte bit0=0, byte1 upper=0001.
+        # type_byte = 0x2E, byte1 = 0x10
+        data = b"\x2e\x10" + struct.pack(">H", 5)
         with pytest.raises(ValueError, match="result=1"):
             _parse_attach_user_confirm(data)
 
@@ -297,16 +301,13 @@ class TestChannelJoinConfirm:
 
     def test_parse_success(self):
         """Parse a successful Channel Join Confirm returns channel ID."""
-        # type_byte = 0x3E with result=0: 0x3C | 0x00 = 0x3C? 
-        # Actually: base is 0x3C, result in bits 1:0
-        # For result=0: type_byte & 0x03 == 0
-        # So type_byte = 0x3E & 0xFC = 0x3C... let's use 0x3C for result=0
-        # Wait, the spec says type byte is 0x3E. Let me re-check.
-        # The PER type byte for Channel Join Confirm is 0x3E
-        # But result is encoded in the low 2 bits.
-        # So for success: type_byte = 0x3E & 0xFC | 0 = 0x3C
+        # PER encoding: byte0 = (choice=15 << 2) | (present=1 << 1) | result_bit0=0 = 0x3E
+        # byte1 = result_rest(0) << 4 = 0x00
+        # bytes 2-3 = initiator (userId - 1001, big-endian)
+        # bytes 4-5 = requested channel ID
+        # bytes 6-7 = actual channel ID (present flag set)
         data = (
-            b"\x3c"  # type with result=0
+            b"\x3e\x00"  # type with result=0, channelId present
             + struct.pack(">H", 6)  # user channel ID (1007 - 1001 = 6)
             + struct.pack(">H", 1003)  # requested channel ID
             + struct.pack(">H", 1003)  # actual channel ID
@@ -317,15 +318,16 @@ class TestChannelJoinConfirm:
 
     def test_parse_failure(self):
         """Parse a failed Channel Join Confirm returns non-zero result."""
-        # result = 2 (failure): type_byte = 0x3C | 0x02 = 0x3E
+        # result=1: type_byte bit0=0, byte1 upper nibble=0001
+        # type_byte = 0x3E (present=1, bit0=0), byte1 = 0x10
         data = (
-            b"\x3e"  # type with result=2
+            b"\x3e\x10"  # type with result=1, channelId present
             + struct.pack(">H", 6)  # user channel ID
             + struct.pack(">H", 1003)  # requested channel ID
             + struct.pack(">H", 1003)  # channel ID
         )
         result, channel_id = _parse_channel_join_confirm(data)
-        assert result == 2
+        assert result == 1  # Non-zero result indicates failure
 
 
 class TestSendDataRequest:
@@ -509,8 +511,9 @@ async def test_erect_domain_and_attach_user():
     """erect_domain_and_attach_user sends correct PDUs and returns user channel ID."""
     mock_x224 = _make_mock_x224()
 
-    # Attach User Confirm: result=0, user_id=6 (channel 1007)
-    mock_x224.recv_pdu.return_value = b"\x2c" + struct.pack(">H", 6)
+    # Attach User Confirm: result=0, present=1, user_id=6 (channel 1007)
+    # PER: 0x2E (choice=11, present=1, result_bit0=0) + 0x00 (result_rest) + u16(6)
+    mock_x224.recv_pdu.return_value = b"\x2e\x00" + struct.pack(">H", 6)
 
     mcs = McsLayer(mock_x224)
     user_channel_id = await mcs.erect_domain_and_attach_user()
@@ -534,7 +537,7 @@ async def test_join_channels_success():
     # All Channel Join Confirms succeed (result=0)
     def make_confirm(channel_id: int) -> bytes:
         return (
-            b"\x3c"  # type with result=0
+            b"\x3e\x00"  # type: choice=15, present=1, result=0
             + struct.pack(">H", 6)  # user channel ID
             + struct.pack(">H", channel_id)  # requested
             + struct.pack(">H", channel_id)  # actual
@@ -564,10 +567,10 @@ async def test_join_channels_failure():
 
     # First join succeeds, second fails
     mock_x224.recv_pdu.side_effect = [
-        # Success for user channel
-        b"\x3c" + struct.pack(">H", 6) + struct.pack(">H", 1007) + struct.pack(">H", 1007),
-        # Failure for I/O channel (result=2)
-        b"\x3e" + struct.pack(">H", 6) + struct.pack(">H", 1003) + struct.pack(">H", 1003),
+        # Success for user channel: 0x3E (choice=15, present=1, bit0=0) + 0x00 (result=0)
+        b"\x3e\x00" + struct.pack(">H", 6) + struct.pack(">H", 1007) + struct.pack(">H", 1007),
+        # Failure for I/O channel: result=1 -> bit0=0, rest=0001 -> byte1=0x10
+        b"\x3e\x10" + struct.pack(">H", 6) + struct.pack(">H", 1003) + struct.pack(">H", 1003),
     ]
 
     mcs = McsLayer(mock_x224)
