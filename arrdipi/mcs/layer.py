@@ -388,11 +388,12 @@ def _parse_connect_response(data: bytes) -> bytes:
 def _build_erect_domain_request() -> bytes:
     """Build an MCS Erect Domain Request PDU (PER).
 
-    Type byte: 0x04
-    subHeight: u16 = 0
-    subInterval: u16 = 0
+    Per MS-RDPBCGR 2.2.1.5, the fields are PER-encoded integers:
+    - Type byte: 0x04
+    - subHeight: PER integer (length-prefixed)
+    - subInterval: PER integer (length-prefixed)
     """
-    return b"\x04" + _per_encode_u16(0) + _per_encode_u16(0)
+    return b"\x04\x01\x00\x01\x00"  # type + subHeight(0) + subInterval(0)
 
 
 def _build_attach_user_request() -> bytes:

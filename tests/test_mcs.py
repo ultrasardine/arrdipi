@@ -242,9 +242,9 @@ class TestErectDomainRequest:
     """Test Erect Domain Request PDU construction."""
 
     def test_structure(self):
-        """Erect Domain Request has type byte 0x04 and two u16 zeros."""
+        """Erect Domain Request has type byte 0x04 and PER-encoded subHeight(0) + subInterval(0)."""
         pdu = _build_erect_domain_request()
-        assert pdu == b"\x04\x00\x00\x00\x00"
+        assert pdu == b"\x04\x01\x00\x01\x00"
 
 
 class TestAttachUserRequest:
