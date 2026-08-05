@@ -369,30 +369,63 @@ class X224Layer:
     async def recv_pdu(self) -> bytes:
         """Receive a TPKT frame, strip the X.224 Data TPDU header, return payload.
 
+        Also handles Fast-Path PDUs (first byte != 0x03) by reading and
+        discarding them, then continuing to read the next standard-path PDU.
+
         Returns:
             The payload bytes after stripping TPKT and X.224 Data headers.
         """
-        # Read TPKT header (4 bytes)
-        header_data = await self._tcp.recv(TPKT_HEADER_SIZE)
-        total_length = decode_tpkt_header(header_data)
+        while True:
+            # Read first byte to determine PDU type
+            first_byte_data = await self._tcp.recv(1)
+            first_byte = first_byte_data[0]
 
-        # Read remaining data
-        payload_length = total_length - TPKT_HEADER_SIZE
-        payload = await self._tcp.recv(payload_length)
+            if first_byte == TPKT_VERSION:
+                # Standard path: TPKT frame
+                # Read remaining 3 bytes of TPKT header
+                rest_header = await self._tcp.recv(TPKT_HEADER_SIZE - 1)
+                header_data = first_byte_data + rest_header
+                total_length = decode_tpkt_header(header_data)
 
-        # Strip X.224 Data TPDU header (3 bytes: LI, DT code, EOT)
-        if len(payload) < 3:
-            msg = "X.224 Data TPDU too short"
-            raise ValueError(msg)
+                # Read remaining data
+                payload_length = total_length - TPKT_HEADER_SIZE
+                payload = await self._tcp.recv(payload_length)
 
-        # Verify it's a Data TPDU
-        li = payload[0]
-        tpdu_code = payload[1] & 0xF0
-        if tpdu_code != X224_TPDU_DATA:
-            msg = f"Expected Data TPDU (0xF0), got 0x{tpdu_code:02X}"
-            raise ValueError(msg)
+                # Strip X.224 Data TPDU header (3 bytes: LI, DT code, EOT)
+                if len(payload) < 3:
+                    msg = "X.224 Data TPDU too short"
+                    raise ValueError(msg)
 
-        # Return payload after the X.224 Data header
-        # LI tells us the header length (excluding LI byte itself)
-        header_size = li + 1  # LI byte + LI value bytes
-        return payload[header_size:]
+                # Verify it's a Data TPDU
+                li = payload[0]
+                tpdu_code = payload[1] & 0xF0
+                if tpdu_code != X224_TPDU_DATA:
+                    msg = f"Expected Data TPDU (0xF0), got 0x{tpdu_code:02X}"
+                    raise ValueError(msg)
+
+                # Return payload after the X.224 Data header
+                header_size = li + 1  # LI byte + LI value bytes
+                return payload[header_size:]
+
+            else:
+                # Fast-Path PDU [MS-RDPBCGR] 2.2.9.1.2
+                # First byte: action(2 bits) + flags(4 bits) + length_indicator(2 bits)
+                # Second byte (and optionally third): length
+                second_byte_data = await self._tcp.recv(1)
+                second_byte = second_byte_data[0]
+
+                if second_byte & 0x80:
+                    # Two-byte length: ((second & 0x7F) << 8) | third
+                    third_byte_data = await self._tcp.recv(1)
+                    fp_length = ((second_byte & 0x7F) << 8) | third_byte_data[0]
+                    header_consumed = 3
+                else:
+                    # Single-byte length
+                    fp_length = second_byte
+                    header_consumed = 2
+
+                # Read and discard the remaining Fast-Path data
+                remaining = fp_length - header_consumed
+                if remaining > 0:
+                    await self._tcp.recv(remaining)
+                # Loop back to read the next PDU

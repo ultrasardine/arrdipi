@@ -513,8 +513,9 @@ class TestX224LayerDataPdu:
         total_length = TPKT_HEADER_SIZE + len(tpkt_payload)
         tpkt_header = struct.pack(">BBH", TPKT_VERSION, 0, total_length)
 
+        # recv_pdu reads: 1 byte (version), 3 bytes (rest of header), then payload
         mock_tcp.recv = AsyncMock(
-            side_effect=[tpkt_header, tpkt_payload]
+            side_effect=[tpkt_header[:1], tpkt_header[1:], tpkt_payload]
         )
 
         result = await layer.recv_pdu()
@@ -534,7 +535,7 @@ class TestX224LayerDataPdu:
 
         # Simulate receiving the same frame
         mock_tcp.recv = AsyncMock(
-            side_effect=[sent_frame[:4], sent_frame[4:]]
+            side_effect=[sent_frame[:1], sent_frame[1:4], sent_frame[4:]]
         )
 
         # Receive
@@ -552,7 +553,7 @@ class TestX224LayerDataPdu:
         total_length = TPKT_HEADER_SIZE + len(bad_payload)
         tpkt_header = struct.pack(">BBH", TPKT_VERSION, 0, total_length)
 
-        mock_tcp.recv = AsyncMock(side_effect=[tpkt_header, bad_payload])
+        mock_tcp.recv = AsyncMock(side_effect=[tpkt_header[:1], tpkt_header[1:], bad_payload])
 
         with pytest.raises(ValueError, match="Expected Data TPDU"):
             await layer.recv_pdu()
@@ -568,7 +569,7 @@ class TestX224LayerDataPdu:
         total_length = TPKT_HEADER_SIZE + len(bad_payload)
         tpkt_header = struct.pack(">BBH", TPKT_VERSION, 0, total_length)
 
-        mock_tcp.recv = AsyncMock(side_effect=[tpkt_header, bad_payload])
+        mock_tcp.recv = AsyncMock(side_effect=[tpkt_header[:1], tpkt_header[1:], bad_payload])
 
         with pytest.raises(ValueError, match="too short"):
             await layer.recv_pdu()
