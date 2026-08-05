@@ -117,8 +117,13 @@ async def test_close_closes_writer():
 
 
 @pytest.mark.asyncio
-async def test_upgrade_to_tls_replaces_reader():
-    """upgrade_to_tls() uses start_tls and replaces the reader."""
+async def test_upgrade_to_tls_updates_writer_transport():
+    """upgrade_to_tls() uses start_tls and updates writer's transport.
+
+    The reader is NOT replaced because start_tls() internally calls
+    connection_made() on the protocol, which reconnects the existing
+    reader to the new TLS transport.
+    """
     mock_reader = AsyncMock(spec=asyncio.StreamReader)
     mock_writer = MagicMock(spec=asyncio.StreamWriter)
 
@@ -152,9 +157,11 @@ async def test_upgrade_to_tls_replaces_reader():
         server_hostname="rdp.example.com",
     )
 
-    # Reader should be replaced with a new StreamReader
-    assert transport.reader is not mock_reader
-    assert isinstance(transport.reader, asyncio.StreamReader)
+    # Writer's internal transport should be updated to the TLS transport
+    assert mock_writer._transport is mock_tls_transport
+
+    # Reader should remain the same (protocol handles reconnection internally)
+    assert transport.reader is mock_reader
 
 
 @pytest.mark.asyncio

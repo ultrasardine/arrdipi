@@ -91,8 +91,9 @@ class TcpTransport:
 
         Uses the asyncio event loop's start_tls() method which is the
         correct STARTTLS pattern for upgrading mid-stream connections.
-        The existing transport/protocol pair is upgraded and a new
-        TLS-wrapped transport is returned.
+
+        After start_tls(), we need to properly reconnect the StreamReader
+        to the new TLS transport by updating the protocol's internal state.
 
         Args:
             ssl_context: Configured SSL context for the TLS handshake.
@@ -106,6 +107,8 @@ class TcpTransport:
         transport = self.writer.transport
         protocol = transport.get_protocol()
 
+        # Perform the TLS handshake — this returns a new SSLTransport
+        # that wraps the original transport.
         new_transport = await loop.start_tls(
             transport,
             protocol,
@@ -113,13 +116,12 @@ class TcpTransport:
             server_hostname=server_hostname,
         )
 
-        # Replace the writer's transport with the TLS-wrapped one
+        # After start_tls(), the protocol's connection_made() is called
+        # with the new transport. Update our references.
+        # The StreamReaderProtocol stores the reader internally, and the
+        # reader should continue to work with data from the new transport.
         self.writer._transport = new_transport  # noqa: SLF001
 
-        # Create a new reader connected to the upgraded transport
-        new_reader = asyncio.StreamReader()
-        new_protocol = asyncio.StreamReaderProtocol(new_reader)
-        new_protocol.connection_made(new_transport)
-        new_transport.set_protocol(new_protocol)
-
-        self.reader = new_reader
+        # The reader continues to work because the protocol (which feeds
+        # data to the reader) is now connected to the TLS transport.
+        # We don't need to create a new reader.
