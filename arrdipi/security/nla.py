@@ -82,31 +82,18 @@ class NlaSecurityLayer(SecurityLayer):
     async def _upgrade_tls(self, tcp: TcpTransport) -> None:
         """Upgrade TCP connection to TLS for NLA/CredSSP.
 
-        Configures TLS 1.2 with relaxed security level for RDP compatibility.
-        Always sends server_hostname for SNI regardless of certificate
-        verification — the RDP server may require it to select the right cert.
+        Uses ssl.create_default_context() which provides standard TLS
+        defaults (TLS 1.2+, secure ciphers). Certificate verification
+        is disabled when verify_cert is False since RDP servers typically
+        use self-signed certificates.
         """
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        ctx = ssl.create_default_context()
 
-        # SECLEVEL=0 allows legacy cipher strengths and SHA-1 signature
-        # algorithms needed for older Windows RDP servers.
-        ctx.set_ciphers("DEFAULT:!aNULL:!eNULL:@SECLEVEL=0")
-
-        if self.verify_cert:
-            ctx.load_default_certs()
-            ctx.check_hostname = True
-            ctx.verify_mode = ssl.CERT_REQUIRED
-        else:
+        if not self.verify_cert:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
             logger.warning("TLS certificate verification disabled for NLA")
 
-        # Only pass server_hostname for SNI when verifying certificates.
-        # When connecting through tunnels (e.g. SSM), the host is "localhost"
-        # which would cause the RDP server to reject the handshake (it has no
-        # certificate matching "localhost").
         hostname = self.server_hostname if self.verify_cert else None
         await tcp.upgrade_to_tls(ctx, server_hostname=hostname)
 
