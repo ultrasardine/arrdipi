@@ -132,6 +132,7 @@ class ConnectionSequence:
         self._x224: X224Layer | None = None
         self._mcs: McsLayer | None = None
         self._security: SecurityLayer | None = None
+        self._selected_protocol: NegotiationProtocol = NegotiationProtocol.PROTOCOL_RDP
         self._server_core: ServerCoreData | None = None
         self._server_security: ServerSecurityData | None = None
         self._server_network: ServerNetworkData | None = None
@@ -151,6 +152,7 @@ class ConnectionSequence:
             tcp, x224, selected_protocol = await self._phase1_connection_initiation()
             self._tcp = tcp
             self._x224 = x224
+            self._selected_protocol = selected_protocol
 
             # Create security layer based on negotiated protocol
             security_layer = self._create_security_layer(selected_protocol)
@@ -304,6 +306,7 @@ class ConnectionSequence:
             supported_color_depths=0x000F,  # 15/16/24/32
             client_name=self._config.username[:15] or "arrdipi",
             early_capability_flags=0x0001,  # RNS_UD_CS_SUPPORT_ERRINFO_PDU
+            server_selected_protocol=self._selected_protocol.value,
         )
 
         # Build client security data
