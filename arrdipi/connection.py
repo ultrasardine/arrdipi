@@ -133,6 +133,7 @@ class ConnectionSequence:
         self._mcs: McsLayer | None = None
         self._security: SecurityLayer | None = None
         self._selected_protocol: NegotiationProtocol = NegotiationProtocol.PROTOCOL_RDP
+        self._share_id: int = 0
         self._server_core: ServerCoreData | None = None
         self._server_security: ServerSecurityData | None = None
         self._server_network: ServerNetworkData | None = None
@@ -188,6 +189,7 @@ class ConnectionSequence:
             # Phase 9: Capabilities Exchange (Req 7)
             self._current_phase = 9
             share_id, server_caps = await self._phase9_capabilities_exchange()
+            self._share_id = share_id
 
             # Phase 10: Connection Finalization (Req 8)
             self._current_phase = 10
@@ -532,7 +534,7 @@ class ConnectionSequence:
         share_control_header = struct.pack(
             "<HHH",
             total_length,
-            0x0003,  # CONFIRM_ACTIVE (with version bits)
+            0x0013,  # PDUTYPE_CONFIRMACTIVEPDU (type=3 | version=1<<4)
             self._mcs.user_channel_id,
         )
         full_pdu = share_control_header + confirm_payload
@@ -690,9 +692,10 @@ class ConnectionSequence:
         # Build ShareData header
         # shareId(4) + pad1(1) + streamId(1) + uncompressedLength(2) +
         # pduType2(1) + compressedType(1) + compressedLength(2)
+        share_id = getattr(self, '_share_id', 0)
         share_data_header = struct.pack(
             "<IBBHBBH",
-            0,  # shareId (will be filled by server context, 0 is fine for client)
+            share_id,  # shareId from Demand Active
             0,  # pad1
             1,  # streamId (STREAM_LOW)
             len(payload),  # uncompressedLength
@@ -707,7 +710,7 @@ class ConnectionSequence:
         share_control_header = struct.pack(
             "<HHH",
             total_length,
-            0x0007,  # DATA PDU type (with version bits)
+            0x0017,  # PDUTYPE_DATAPDU (type=7 | version=1<<4)
             self._mcs.user_channel_id,
         )
 

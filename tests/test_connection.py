@@ -552,7 +552,7 @@ class TestPhase10ConnectionFinalization:
         # Wrap each in ShareData + ShareControl (no security header for Enhanced Security)
         def wrap_server_pdu(pdu_type2: int, payload: bytes) -> bytes:
             share_data = _wrap_in_share_data(pdu_type2, payload)
-            share_control = _wrap_in_share_control(0x0007, 1003, share_data)
+            share_control = _wrap_in_share_control(0x0017, 1003, share_data)
             return share_control
 
         server_pdus = [
