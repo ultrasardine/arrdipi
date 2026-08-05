@@ -467,17 +467,26 @@ def encode_gcc_conference_create_request(
     header.extend(b"\x00\x05\x00\x14\x7c\x00\x01")
 
     # ConnectData::connectPDU length (PER length encoding)
-    # This is the length of everything after this point
-    connect_pdu_len = 14 + user_data_len  # fixed fields + user data
+    # This is the length of everything after this point:
+    # 8 bytes (CCR fixed) + 4 bytes ("Duca") + PER len bytes + user_data
+    connect_pdu_len = 14 + user_data_len  # 8+4+2=14 when user_data_len > 127
+    if user_data_len <= 0x7F:
+        connect_pdu_len = 13 + user_data_len  # 8+4+1=13 when single-byte PER len
     if connect_pdu_len > 0x7F:
         header.append(0x80 | ((connect_pdu_len >> 8) & 0x7F))
         header.append(connect_pdu_len & 0xFF)
     else:
         header.append(connect_pdu_len & 0x7F)
 
-    # ConferenceCreateRequest fixed fields
-    # PER encoding of the Conference Create Request
-    header.extend(b"\x08\x00\x10\x00\x01\xc0\x00")
+    # ConferenceCreateRequest PER encoding:
+    # 0x00: extension bit (0) + choice index for ConferenceCreateRequest
+    # 0x08: optional fields present (userData)
+    # 0x00 0x10: conferenceName numeric ("1")
+    # 0x00: terminationMethod (automatic)
+    # 0x01: number of UserData sets
+    # 0xC0: UserData present + key choice (h221NonStandard)
+    # 0x00: h221NonStandard key length indicator (4 octets)
+    header.extend(b"\x00\x08\x00\x10\x00\x01\xc0\x00")
 
     # H.221 non-standard identifier key "Duca" (McDn in some docs)
     header.extend(b"\x44\x75\x63\x61")

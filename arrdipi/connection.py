@@ -310,10 +310,18 @@ class ConnectionSequence:
         )
 
         # Build client security data
-        client_security = ClientSecurityData(
-            encryption_methods=0x0000003B,  # 40-bit + 128-bit + 56-bit + FIPS
-            ext_encryption_methods=0,
-        )
+        # Per MS-RDPBCGR 2.2.1.3.3: when Enhanced Security (NLA/TLS) is in
+        # effect, encryption methods MUST both be 0.
+        if self._security and self._security.is_enhanced:
+            client_security = ClientSecurityData(
+                encryption_methods=0,
+                ext_encryption_methods=0,
+            )
+        else:
+            client_security = ClientSecurityData(
+                encryption_methods=0x0000003B,  # 40-bit + 128-bit + 56-bit + FIPS
+                ext_encryption_methods=0,
+            )
 
         # Send Connect Initial, receive Connect Response
         server_core, server_security, server_network = await mcs.connect_initial(
