@@ -475,6 +475,28 @@ def _parse_capability_sets(data: bytes, count: int) -> dict[CapabilitySetType, P
     return caps
 
 
+def _extract_raw_capability_sets(data: bytes, count: int) -> list[bytes]:
+    """Extract raw capability set bytes (header + payload) for pass-through.
+
+    Returns each capability as its complete raw bytes (type + length + payload).
+    """
+    reader = ByteReader(data, pdu_type="RawCapabilitySets")
+    raw_caps: list[bytes] = []
+    for _ in range(count):
+        if reader.remaining() < 4:
+            break
+        start = reader.offset
+        _cap_type = reader.read_u16_le()
+        length = reader.read_u16_le()
+        payload_length = length - _CAP_HEADER_SIZE
+        if payload_length < 0 or reader.remaining() < payload_length:
+            break
+        reader.read_bytes(payload_length)
+        # Capture the full raw bytes of this capability (header + payload)
+        raw_caps.append(data[start:reader.offset])
+    return raw_caps
+
+
 def _serialize_capability_set(cap_type: CapabilitySetType, cap: Pdu) -> bytes:
     """Serialize a single capability set with its header."""
     payload = cap.serialize()
@@ -495,12 +517,14 @@ class DemandActivePdu(Pdu):
     share_id: int = 0
     source_descriptor: bytes = b""
     capability_sets: dict[CapabilitySetType, Pdu] = field(default_factory=dict)
+    raw_capability_bytes: list[bytes] = field(default_factory=list)
 
     @classmethod
     def parse(cls, data: bytes) -> Self:
         """Parse DemandActivePdu from binary data.
 
         Extracts share ID and all server capability sets.
+        Also preserves raw capability bytes for echo-back in Confirm Active.
         """
         reader = ByteReader(data, pdu_type="DemandActivePdu")
         share_id = reader.read_u32_le()
@@ -514,10 +538,14 @@ class DemandActivePdu(Pdu):
         caps_data = reader.read_bytes(length_combined_capabilities - 4)  # subtract numberCaps + pad
         capability_sets = _parse_capability_sets(caps_data, number_capabilities)
 
+        # Also extract raw capability bytes for pass-through
+        raw_caps = _extract_raw_capability_sets(caps_data, number_capabilities)
+
         return cls(
             share_id=share_id,
             source_descriptor=source_descriptor,
             capability_sets=capability_sets,
+            raw_capability_bytes=raw_caps,
         )
 
     def serialize(self) -> bytes:
@@ -550,6 +578,8 @@ class ConfirmActivePdu(Pdu):
     originator_id: int = 0x03EA
     source_descriptor: bytes = b"MSTSC\x00"
     capability_sets: dict[CapabilitySetType, Pdu] = field(default_factory=dict)
+    raw_caps_override: bytes = b""  # Pre-built raw caps bytes (bypasses capability_sets if set)
+    num_caps_override: int = 0  # Number of caps in raw_caps_override
 
     @classmethod
     def parse(cls, data: bytes) -> Self:
@@ -576,10 +606,17 @@ class ConfirmActivePdu(Pdu):
 
     def serialize(self) -> bytes:
         """Serialize ConfirmActivePdu to binary wire format (Req 7, AC 2)."""
-        # Serialize all capability sets
-        caps_data = bytearray()
-        for cap_type, cap in self.capability_sets.items():
-            caps_data.extend(_serialize_capability_set(cap_type, cap))
+        if self.raw_caps_override:
+            # Use pre-built raw capability bytes (pass-through from server)
+            caps_data = self.raw_caps_override
+            num_caps = self.num_caps_override
+        else:
+            # Serialize from parsed capability sets
+            caps_data_buf = bytearray()
+            for cap_type, cap in self.capability_sets.items():
+                caps_data_buf.extend(_serialize_capability_set(cap_type, cap))
+            caps_data = bytes(caps_data_buf)
+            num_caps = len(self.capability_sets)
 
         writer = ByteWriter()
         writer.write_u32_le(self.share_id)
@@ -588,9 +625,9 @@ class ConfirmActivePdu(Pdu):
         # lengthCombinedCapabilities includes numberCapabilities (u16) + pad2octets (u16) + caps data
         writer.write_u16_le(len(caps_data) + 4)
         writer.write_bytes(self.source_descriptor)
-        writer.write_u16_le(len(self.capability_sets))
+        writer.write_u16_le(num_caps)
         writer.write_u16_le(0)  # pad2octets
-        writer.write_bytes(bytes(caps_data))
+        writer.write_bytes(caps_data)
         return writer.to_bytes()
 
 
@@ -610,23 +647,25 @@ class ClientCapabilitiesConfig:
 def build_client_capabilities(
     server_caps: dict[CapabilitySetType, Pdu],
     config: ClientCapabilitiesConfig,
+    raw_server_caps: list[bytes] | None = None,
 ) -> list[tuple[CapabilitySetType, Pdu]]:
     """Build the client capability set list for the Confirm Active PDU.
 
-    Returns a minimal set of capabilities that satisfies the server.
-    Each capability payload size must exactly match MS-RDPBCGR 2.2.7.
+    Strategy: echo back ALL server capabilities (raw pass-through for types we
+    don't customize), then override specific ones with client-appropriate values.
+    This ensures the server sees responses for all mandatory capability types.
 
     Args:
         server_caps: Parsed server capability sets from DemandActivePdu.
         config: Client configuration for resolution, color depth, etc.
+        raw_server_caps: Raw capability bytes from server for pass-through.
 
     Returns:
         List of (CapabilitySetType, capability_set) tuples for ConfirmActivePdu.
     """
     caps: list[tuple[CapabilitySetType, Pdu]] = []
 
-    # General capability set — MS-RDPBCGR 2.2.7.1.1
-    # Total payload must be 24 bytes (not 20)
+    # General capability set — MS-RDPBCGR 2.2.7.1.1 (payload: 24 bytes)
     general = GeneralCapabilitySet(
         os_major_type=1,  # OSMAJORTYPE_WINDOWS
         os_minor_type=3,  # OSMINORTYPE_WINDOWS_NT
@@ -642,7 +681,7 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.GENERAL, general))
 
-    # Bitmap capability set — MS-RDPBCGR 2.2.7.1.2
+    # Bitmap capability set — MS-RDPBCGR 2.2.7.1.2 (payload: 24 bytes)
     bitmap = BitmapCapabilitySet(
         preferred_bits_per_pixel=config.color_depth,
         desktop_width=config.width,
@@ -653,7 +692,7 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.BITMAP, bitmap))
 
-    # Order capability set — MS-RDPBCGR 2.2.7.1.3
+    # Order capability set — MS-RDPBCGR 2.2.7.1.3 (payload: 84 bytes)
     order_support = bytearray(32)
     order_support[0] = 1   # DstBlt
     order_support[1] = 1   # PatBlt
@@ -673,7 +712,7 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.ORDER, order))
 
-    # Input capability set — MS-RDPBCGR 2.2.7.1.6
+    # Input capability set — MS-RDPBCGR 2.2.7.1.6 (payload: 84 bytes)
     input_cap = InputCapabilitySet(
         input_flags=(
             INPUT_FLAG_SCANCODES
@@ -689,7 +728,7 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.INPUT, input_cap))
 
-    # Pointer capability set — MS-RDPBCGR 2.2.7.1.5
+    # Pointer capability set — MS-RDPBCGR 2.2.7.1.5 (payload: 6 bytes)
     pointer = PointerCapabilitySet(
         color_pointer_flag=1,
         color_pointer_cache_size=25,
@@ -697,7 +736,7 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.POINTER, pointer))
 
-    # Virtual channel capability set — MS-RDPBCGR 2.2.7.1.10
+    # Virtual channel capability set — MS-RDPBCGR 2.2.7.1.10 (payload: 8 bytes)
     virtual_channel = VirtualChannelCapabilitySet(
         flags=VCCAPS_COMPR_CS_8K,
         vc_chunk_size=1600,

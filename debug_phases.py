@@ -264,6 +264,24 @@ async def main():
         from arrdipi.pdu.capabilities import DemandActivePdu, ConfirmActivePdu, build_client_capabilities, ClientCapabilitiesConfig
         demand = DemandActivePdu.parse(demand_payload[6:])
         print(f"  shareId=0x{demand.share_id:08X}, caps={len(demand.capability_sets)}")
+        # Dump server's capability types
+        print(f"  Server cap types: {[f'0x{int(t):04X}' for t in demand.capability_sets.keys()]}")
+        
+        # Also dump raw cap types from the demand active to catch ones we don't parse
+        raw_body = demand_payload[6:]  # after ShareControl
+        d_offset = 4 + 2 + 2  # shareId + srcDescLen + combCapsLen
+        src_len = struct.unpack_from('<H', raw_body, 4)[0]
+        d_offset += src_len  # skip source descriptor
+        raw_num_caps = struct.unpack_from('<H', raw_body, d_offset)[0]
+        d_offset += 4  # numCaps + pad
+        print(f"  Raw server caps ({raw_num_caps} total):")
+        for ri in range(raw_num_caps):
+            if d_offset + 4 > len(raw_body):
+                break
+            rct = struct.unpack_from('<H', raw_body, d_offset)[0]
+            rcl = struct.unpack_from('<H', raw_body, d_offset+2)[0]
+            print(f"    type=0x{rct:04X} len={rcl}")
+            d_offset += rcl
 
         # Build and send Confirm Active
         caps_config = ClientCapabilitiesConfig(width=1920, height=1080, color_depth=32)
@@ -277,6 +295,21 @@ async def main():
         # Wrap in ShareControl header
         sc_total = len(confirm_data) + 6
         share_control = struct.pack("<HHH", sc_total, 0x0013, user_channel_id) + confirm_data
+        
+        # Dump the full PDU for debugging
+        print(f"  Confirm Active hex dump (first 80 bytes):")
+        print(f"  SC header: {share_control[:6].hex()}")
+        print(f"  Body[0:20]: {confirm_data[:20].hex()}")
+        # Show each cap header
+        offset = 10 + 6  # shareId(4)+orig(2)+srcLen(2)+combLen(2) + srcDesc(6)
+        num_c = struct.unpack_from('<H', confirm_data, offset)[0]
+        print(f"  numCaps={num_c} at offset {offset}")
+        cap_off = offset + 4
+        for ci in range(num_c):
+            ct = struct.unpack_from('<H', confirm_data, cap_off)[0]
+            cl = struct.unpack_from('<H', confirm_data, cap_off+2)[0]
+            print(f"    Cap type=0x{ct:04X} len={cl} data={confirm_data[cap_off:cap_off+min(cl,16)].hex()}")
+            cap_off += cl
         
         # Send via MCS
         mcs_pdu = _build_send_data_request(user_channel_id, io_channel, share_control)
