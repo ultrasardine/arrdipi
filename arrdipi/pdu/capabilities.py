@@ -109,7 +109,7 @@ class GeneralCapabilitySet(Pdu):
     def serialize(self) -> bytes:
         """Serialize GeneralCapabilitySet to payload bytes (without header).
         
-        Total payload: 24 bytes per MS-RDPBCGR 2.2.7.1.1.
+        Total payload: 20 bytes per MS-RDPBCGR 2.2.7.1.1.
         """
         writer = ByteWriter()
         writer.write_u16_le(self.os_major_type)
@@ -123,9 +123,6 @@ class GeneralCapabilitySet(Pdu):
         writer.write_u16_le(self.general_compression_level)
         writer.write_u8(self.refresh_rect_support)
         writer.write_u8(self.suppress_output_support)
-        # pad2octetsB + pad2octetsC — required to reach 24-byte payload per spec
-        writer.write_u16_le(0)
-        writer.write_u16_le(0)
         return writer.to_bytes()
 
 

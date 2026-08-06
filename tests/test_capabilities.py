@@ -60,7 +60,7 @@ class TestGeneralCapabilitySetRoundTrip:
         cap = GeneralCapabilitySet()
         data = cap.serialize()
         # 9 x u16 + 2 x u8 = 20 bytes
-        assert len(data) == 24
+        assert len(data) == 20
 
 
 class TestBitmapCapabilitySetRoundTrip:
