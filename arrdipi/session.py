@@ -16,6 +16,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from arrdipi.channels.static import StaticVirtualChannel
+from arrdipi.codec.mppc import MppcDecompressor
+from arrdipi.codec.rdp6_bitmap import Rdp6BitmapCodec
+from arrdipi.codec.rle import RleCodec
+from arrdipi.errors import CodecError, MppcDecompressError, PduParseError, RleDecodeError
+from arrdipi.pdu.base import ByteReader
+from arrdipi.graphics.gdi import GdiOrderProcessor
 from arrdipi.graphics.pointer import PointerHandler
 from arrdipi.graphics.surface import GraphicsSurface, Rect
 from arrdipi.mcs.layer import McsLayer
@@ -28,6 +34,9 @@ from arrdipi.pdu.fastpath import (
     FastPathKeyboardEvent,
     FastPathKeyboardFlags,
     FastPathMouseEvent,
+    FastPathOutputFragmentation,
+    FastPathOutputPdu,
+    FastPathOutputUpdateCode,
     FastPathUnicodeEvent,
 )
 from arrdipi.pdu.input_pdu import (
@@ -37,6 +46,13 @@ from arrdipi.pdu.input_pdu import (
     MouseEvent,
     PointerFlags,
     UnicodeKeyboardEvent,
+)
+from arrdipi.pdu.pointer_pdu import (
+    CachedPointerUpdate,
+    ColorPointerUpdate,
+    LargePointerUpdate,
+    NewPointerUpdate,
+    PointerPositionUpdate,
 )
 from arrdipi.pdu.types import CapabilitySetType
 from arrdipi.reconnect import ReconnectHandler
@@ -107,7 +123,9 @@ class Session:
         width = getattr(config, "width", 1920)
         height = getattr(config, "height", 1080)
         self._surface = GraphicsSurface(width, height)
+        self._gdi = GdiOrderProcessor(self._surface)
         self._pointer = PointerHandler()
+        self._mppc = MppcDecompressor()
 
         # Channels (optional, can be None initially)
         self._static_channels: dict[int, StaticVirtualChannel] = {}
@@ -135,6 +153,10 @@ class Session:
             Callable[[str | None], Awaitable[None]]
         ] = []
 
+        # Fragment reassembly (Req 6)
+        self._fragment_buffers: dict[int, bytearray] = {}
+        self._max_request_size: int = 262144  # 256 KB — matches TS_MULTIFRAGMENTUPDATE_CAPABILITYSET
+
         # Fast-path support detection
         self._fast_path_supported = self._detect_fast_path_support()
 
@@ -147,6 +169,65 @@ class Session:
         if isinstance(general_cap, GeneralCapabilitySet):
             return bool(general_cap.extra_flags & FASTPATH_OUTPUT_SUPPORTED)
         return False
+
+    # --- Fragment reassembly (Req 6, AC 1–8) ---
+
+    def _reassemble_fragment(
+        self, update_code: int, fragmentation: int, data: bytes
+    ) -> bytes | None:
+        """Accumulate a fragmented fast-path update.
+
+        Handles the four fragmentation states per [MS-RDPBCGR] 2.2.9.1.2.1:
+        - SINGLE (0x00): return data as-is (complete update).
+        - FIRST (0x02): start a new accumulation buffer.
+        - NEXT (0x03): append to the existing buffer.
+        - LAST (0x01): complete and return reassembled bytes.
+
+        Returns:
+            The complete reassembled data when LAST fragment arrives,
+            the original data for SINGLE, or None if still accumulating.
+        """
+        from arrdipi.pdu.fastpath import FastPathOutputFragmentation
+
+        if fragmentation == FastPathOutputFragmentation.FASTPATH_FRAGMENT_FIRST:
+            if update_code in self._fragment_buffers:
+                logger.warning(
+                    "Discarding incomplete fragment buffer for update 0x%02X",
+                    update_code,
+                )
+            self._fragment_buffers[update_code] = bytearray(data)
+            return None
+
+        elif fragmentation == FastPathOutputFragmentation.FASTPATH_FRAGMENT_NEXT:
+            buf = self._fragment_buffers.get(update_code)
+            if buf is None:
+                logger.error(
+                    "NEXT fragment without FIRST for update 0x%02X", update_code
+                )
+                return None
+            buf.extend(data)
+            if len(buf) > self._max_request_size:
+                logger.error(
+                    "Fragment buffer exceeds MaxRequestSize for update 0x%02X",
+                    update_code,
+                )
+                del self._fragment_buffers[update_code]
+                return None
+            return None
+
+        elif fragmentation == FastPathOutputFragmentation.FASTPATH_FRAGMENT_LAST:
+            buf = self._fragment_buffers.pop(update_code, None)
+            if buf is None:
+                logger.error(
+                    "LAST fragment without preceding FIRST for update 0x%02X",
+                    update_code,
+                )
+                return None
+            buf.extend(data)
+            return bytes(buf)
+
+        # SINGLE — return data directly
+        return data
 
     # --- Properties (Req 27, AC 3–4) ---
 
@@ -539,21 +620,200 @@ class Session:
         io_channel_id = self._mcs.io_channel_id
         await self._mcs.send_to_channel(io_channel_id, pdu_data)
 
+    # --- Fast-path output handling (Req 3, AC 1–10; Req 8, AC 1, 3, 5; Req 9, AC 3) ---
+
+    async def _handle_fast_path_output(self, data: bytes) -> None:
+        """Parse and dispatch fast-path output PDU updates.
+
+        Applies MPPC decompression and fragment reassembly before routing
+        each update to its type-specific handler.
+
+        Args:
+            data: Raw fast-path output PDU bytes (including header).
+        """
+        try:
+            pdu = FastPathOutputPdu.parse(data)
+        except PduParseError as exc:
+            logger.error(
+                "FastPath parse error: %s | hex: %s", exc, data[:32].hex()
+            )
+            return
+
+        for update in pdu.updates:
+            # Step 1: MPPC bulk decompression if compression bit is set
+            update_data = update.data
+            if update.compression:
+                try:
+                    update_data = self._mppc.decompress(
+                        update.compression_flags, update_data
+                    )
+                except MppcDecompressError as exc:
+                    logger.error(
+                        "MPPC decompress failed for update 0x%02X: %s",
+                        update.update_code,
+                        exc,
+                    )
+                    continue
+
+            # Step 2: Fragment reassembly
+            if update.fragmentation != FastPathOutputFragmentation.FASTPATH_FRAGMENT_SINGLE:
+                update_data = self._reassemble_fragment(
+                    update.update_code, update.fragmentation, update_data
+                )
+                if update_data is None:
+                    continue
+
+            # Step 3: Dispatch by update type
+            match update.update_code:
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_BITMAP:
+                    await self._process_bitmap_update(update_data)
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_ORDERS:
+                    await self._process_orders_update(update_data)
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_SYNCHRONIZE:
+                    pass  # No action needed
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_PTR_NULL:
+                    self._pointer.handle_system_pointer(0x0000)
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_PTR_DEFAULT:
+                    self._pointer.handle_system_pointer(0x7F00)
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_PTR_POSITION:
+                    pos = PointerPositionUpdate.parse(update_data)
+                    self._pointer.handle_position_update(pos.x, pos.y)
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_COLOR:
+                    color_ptr = ColorPointerUpdate.parse(update_data)
+                    self._pointer.handle_color_pointer(color_ptr)
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_CACHED:
+                    cached_ptr = CachedPointerUpdate.parse(update_data)
+                    self._pointer.handle_cached_pointer(cached_ptr.cache_index)
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_POINTER:
+                    new_ptr = NewPointerUpdate.parse(update_data)
+                    self._pointer.handle_new_pointer(new_ptr)
+                case FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_LARGE_POINTER:
+                    large_ptr = LargePointerUpdate.parse(update_data)
+                    self._pointer.handle_large_pointer(large_ptr)
+                case (
+                    FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_PALETTE
+                    | FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_SURFCMDS
+                ):
+                    logger.info(
+                        "Unimplemented fast-path update: 0x%02X",
+                        update.update_code,
+                    )
+                case _:
+                    logger.debug(
+                        "Unknown fast-path update: 0x%02X", update.update_code
+                    )
+
+        # Dispatch dirty rects to registered callbacks
+        dirty = self._surface.get_dirty_rects()
+        if dirty:
+            for cb in self._on_graphics_update_callbacks:
+                try:
+                    await cb(dirty)
+                except Exception:
+                    logger.exception("Graphics update callback failed")
+
+    async def _process_bitmap_update(self, data: bytes) -> None:
+        """Process a FASTPATH_UPDATETYPE_BITMAP update.
+
+        Parses TS_UPDATE_BITMAP_DATA per [MS-RDPBCGR] 2.2.9.1.1.3.1.2 and
+        feeds each TS_BITMAP_DATA rect through the appropriate decompressor.
+
+        Handles:
+        - Compressed < 32 bpp via Interleaved RLE (RleCodec)
+        - Compressed 32 bpp via RDP 6.0 Bitmap Compression (Rdp6BitmapCodec)
+        - Optional bitmapComprHdr (TS_CD_HEADER, 8 bytes) when BITMAP_COMPRESSION
+          is set and NO_BITMAP_COMPRESSION_HDR is NOT set
+        - Uncompressed bitmap data (bottom-up, row-padded)
+
+        Individual decompression failures skip the failed rect with a warning
+        and continue processing remaining rects.
+
+        (Req 4, AC 1–9; Req 8, AC 2, 7)
+        """
+        # Flag constants per [MS-RDPBCGR] 2.2.9.1.1.3.1.2.2
+        BITMAP_COMPRESSION = 0x0001
+        NO_BITMAP_COMPRESSION_HDR = 0x0400
+
+        reader = ByteReader(data, "BitmapUpdate")
+        num_rects = reader.read_u16_le()
+
+        for i in range(num_rects):
+            try:
+                dest_left = reader.read_u16_le()
+                dest_top = reader.read_u16_le()
+                dest_right = reader.read_u16_le()
+                dest_bottom = reader.read_u16_le()
+                width = reader.read_u16_le()
+                height = reader.read_u16_le()
+                bpp = reader.read_u16_le()
+                flags = reader.read_u16_le()
+                bitmap_length = reader.read_u16_le()
+                bitmap_data = reader.read_bytes(bitmap_length)
+
+                compressed = bool(flags & BITMAP_COMPRESSION)
+
+                if compressed:
+                    # Handle optional bitmapComprHdr (TS_CD_HEADER, 8 bytes)
+                    if not (flags & NO_BITMAP_COMPRESSION_HDR):
+                        bitmap_data = bitmap_data[8:]
+
+                    if bpp == 32:
+                        rgba = Rdp6BitmapCodec.decompress(bitmap_data, width, height)
+                    else:
+                        rgba = RleCodec.decompress(
+                            bitmap_data, width, height, bpp,
+                            compressed=True, rect_index=i,
+                        )
+                else:
+                    rgba = RleCodec.decompress(
+                        bitmap_data, width, height, bpp,
+                        compressed=False, rect_index=i,
+                    )
+
+                w = dest_right - dest_left + 1
+                h = dest_bottom - dest_top + 1
+                await self._surface.write_pixels(dest_left, dest_top, w, h, rgba)
+
+            except (RleDecodeError, CodecError) as exc:
+                logger.warning("Bitmap decompression failed for rect %d: %s", i, exc)
+                continue
+
+    async def _process_orders_update(self, data: bytes) -> None:
+        """Process a FASTPATH_UPDATETYPE_ORDERS update.
+
+        Forwards raw drawing order data to the GDI order processor which handles
+        primary, secondary, and alternate secondary orders per [MS-RDPEGDI] 2.2.2.1.
+
+        (Req 5, AC 1–3)
+        """
+        await self._gdi.process_order_data(data)
+
     # --- Background dispatch loop (Req 30, AC 1–2, 5) ---
 
     async def _dispatch_loop(self) -> None:
-        """Read PDUs from MCS, route to handlers, detect disconnection.
+        """Read PDUs from X.224, route fast-path and slow-path, detect disconnection.
 
-        Runs as a background asyncio.Task. Detects disconnection within
-        30 seconds via timeout on recv. Handles Deactivate All + re-activation.
+        Runs as a background asyncio.Task. Uses X224Layer.recv_any() to receive
+        both fast-path and slow-path PDUs. Fast-path PDUs are routed to
+        _handle_fast_path_output(); slow-path PDUs are parsed via MCS
+        SendDataIndication and routed to _route_pdu().
+
+        Detects disconnection within 30 seconds via timeout on recv.
+        Handles Deactivate All + re-activation.
+
+        (Req 2, AC 1–5; Req 8, AC 6)
         """
         while not self._closed:
             try:
-                channel_id, data = await asyncio.wait_for(
-                    self._mcs.recv_pdu(),
+                is_fp, raw = await asyncio.wait_for(
+                    self._x224.recv_any(),
                     timeout=30.0,
                 )
-                await self._route_pdu(channel_id, data)
+                if is_fp:
+                    await self._handle_fast_path_output(raw)
+                else:
+                    channel_id, payload = self._mcs.parse_send_data_indication(raw)
+                    await self._route_pdu(channel_id, payload)
             except asyncio.TimeoutError:
                 # 30s timeout — connection may be stale
                 # Attempt to detect if connection is still alive

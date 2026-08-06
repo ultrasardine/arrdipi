@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from arrdipi.pdu.pointer_pdu import (
     SYSTEM_POINTER_DEFAULT,
     SYSTEM_POINTER_NULL,
+    CachedPointerUpdate,
     ColorPointerUpdate,
     LargePointerUpdate,
     NewPointerUpdate,
@@ -194,6 +195,60 @@ class PointerHandler:
         self._cache[update.cache_index] = pointer
         self._active_pointer = pointer
         self._visible = True
+
+    # ------------------------------------------------------------------
+    # Raw-bytes convenience methods (parse + dispatch)
+    # These accept raw PDU data bytes, parse the appropriate structure,
+    # and delegate to the corresponding handle_* method.
+    # ------------------------------------------------------------------
+
+    def set_color_pointer(self, data: bytes) -> None:
+        """Parse and handle a Color Pointer Update from raw bytes.
+
+        Parses the data per [MS-RDPBCGR] 2.2.9.1.1.4.4 and delegates
+        to :meth:`handle_color_pointer`.
+
+        Args:
+            data: Raw Color Pointer Update PDU payload bytes.
+        """
+        update = ColorPointerUpdate.parse(data)
+        self.handle_color_pointer(update)
+
+    def set_cached(self, data: bytes) -> None:
+        """Parse and handle a Cached Pointer Update from raw bytes.
+
+        Parses the data per [MS-RDPBCGR] 2.2.9.1.1.4.6 and delegates
+        to :meth:`handle_cached_pointer`.
+
+        Args:
+            data: Raw Cached Pointer Update PDU payload bytes (2 bytes: u16 LE cache index).
+        """
+        update = CachedPointerUpdate.parse(data)
+        self.handle_cached_pointer(update.cache_index)
+
+    def set_new_pointer(self, data: bytes) -> None:
+        """Parse and handle a New Pointer Update from raw bytes.
+
+        Parses the data per [MS-RDPBCGR] 2.2.9.1.1.4.5 and delegates
+        to :meth:`handle_new_pointer`.
+
+        Args:
+            data: Raw New Pointer Update PDU payload bytes.
+        """
+        update = NewPointerUpdate.parse(data)
+        self.handle_new_pointer(update)
+
+    def set_large_pointer(self, data: bytes) -> None:
+        """Parse and handle a Large Pointer Update from raw bytes.
+
+        Parses the data per [MS-RDPBCGR] 2.2.9.1.2.1.11 and delegates
+        to :meth:`handle_large_pointer`.
+
+        Args:
+            data: Raw Large Pointer Update PDU payload bytes.
+        """
+        update = LargePointerUpdate.parse(data)
+        self.handle_large_pointer(update)
 
 
 def _create_default_pointer() -> PointerImage:

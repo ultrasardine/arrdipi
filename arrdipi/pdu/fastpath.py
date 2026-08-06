@@ -246,12 +246,14 @@ class FastPathOutputUpdate:
         update_code: The type of update (bitmap, orders, pointer, etc.).
         fragmentation: Fragmentation state of this update.
         compression: Whether the update data is compressed.
+        compression_flags: The compressionFlags byte (only meaningful when compression is set).
         data: The raw update data payload.
     """
 
     update_code: int = 0
     fragmentation: int = FastPathOutputFragmentation.FASTPATH_FRAGMENT_SINGLE
     compression: int = 0
+    compression_flags: int = 0
     data: bytes = b""
 
     def serialize(self) -> bytes:
@@ -267,7 +269,7 @@ class FastPathOutputUpdate:
         )
         w.write_u8(update_header)
         if self.compression:
-            w.write_u8(0)  # compressionFlags placeholder
+            w.write_u8(self.compression_flags)
         w.write_u16_le(len(self.data))
         w.write_bytes(self.data)
         return w.to_bytes()
@@ -280,8 +282,9 @@ class FastPathOutputUpdate:
         fragmentation = (update_header >> 4) & 0x03
         compression = (update_header >> 6) & 0x01
 
+        compression_flags = 0
         if compression:
-            _compression_flags = reader.read_u8()
+            compression_flags = reader.read_u8()
 
         size = reader.read_u16_le()
         data = reader.read_bytes(size)
@@ -290,6 +293,7 @@ class FastPathOutputUpdate:
             update_code=update_code,
             fragmentation=fragmentation,
             compression=compression,
+            compression_flags=compression_flags,
             data=data,
         )
 
@@ -472,15 +476,15 @@ class FastPathOutputPdu(Pdu):
     def parse(cls, data: bytes) -> Self:
         """Parse a fast-path output PDU from raw bytes.
 
-        Format:
-        - fpOutputHeader: u8 (action bits 0-1, reserved bits 2-3, flags bits 4-5, reserved2 bits 6-7)
+        Format per [MS-RDPBCGR] 2.2.9.1.2:
+        - fpOutputHeader: u8 (action bits 0-1, reserved bits 2-5, flags bits 6-7)
         - length: variable (1 or 2 bytes)
         - fpOutputUpdates: sequence of output updates
         """
         reader = ByteReader(data, pdu_type="FastPathOutputPdu")
 
         fp_output_header = reader.read_u8()
-        flags = (fp_output_header >> 4) & 0x03
+        flags = (fp_output_header >> 6) & 0x03
 
         _length = _decode_length(reader)
 
@@ -498,10 +502,11 @@ class FastPathOutputPdu(Pdu):
         for update in self.updates:
             updates_data.extend(update.serialize())
 
-        # Build header byte: action (bits 0-1) | reserved (bits 2-3) | flags (bits 4-5) | reserved2 (bits 6-7)
+        # Build header byte per [MS-RDPBCGR] 2.2.9.1.2:
+        # action (bits 0-1) | reserved (bits 2-5) | flags (bits 6-7)
         fp_output_header = (
             (FastPathOutputAction.FASTPATH_OUTPUT_ACTION_FASTPATH & 0x03)
-            | ((self.flags & 0x03) << 4)
+            | ((self.flags & 0x03) << 6)
         )
 
         # Compute total length

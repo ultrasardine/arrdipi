@@ -480,3 +480,222 @@ class MppcCompressor:
 
         # 11111111110 + 11 bits
         return reader.read_bits(11) + 2048
+
+
+class MppcDecompressor:
+    """MPPC bulk data decompressor per [MS-RDPBCGR] 3.1.8.
+
+    Maintains a sliding-window history buffer across decompression calls
+    within a session. Used for fast-path output update bulk decompression.
+
+    Unlike MppcCompressor (which handles both directions), this class
+    provides a focused decompression-only interface matching the design
+    specification for session-level MPPC decompression.
+    """
+
+    def __init__(self, history_size: int = 65536) -> None:
+        """Initialize the MPPC decompressor with a sliding-window history buffer.
+
+        Args:
+            history_size: Size of the history buffer in bytes. Defaults to
+                64KB (65536) for RDP 5.0 per [MS-RDPBCGR] 3.1.8.
+        """
+        self._history_size = history_size
+        self._history = bytearray(history_size)
+        self._offset = 0
+
+    def decompress(self, compression_flags: int, data: bytes) -> bytes:
+        """Decompress MPPC-compressed data.
+
+        Args:
+            compression_flags: The compressionFlags byte from the update header.
+                Bit 5 (0x20): PACKET_COMPRESSED — data is MPPC-compressed.
+                Bit 6 (0x40): PACKET_AT_FRONT — history offset reset to front.
+                Bit 7 (0x80): PACKET_FLUSHED — history buffer reinitialized.
+            data: The compressed payload bytes.
+
+        Returns:
+            Decompressed bytes.
+
+        Raises:
+            MppcDecompressError: If decompression fails due to corrupted data
+                or history buffer overflow.
+        """
+        from arrdipi.errors import MppcDecompressError
+
+        try:
+            return self._decompress_inner(compression_flags, data)
+        except MppcDecompressError:
+            raise
+        except (IndexError, ValueError, struct.error) as e:
+            raise MppcDecompressError(
+                f"MPPC decompression failed: {e}"
+            ) from e
+
+    def _decompress_inner(self, compression_flags: int, data: bytes) -> bytes:
+        """Internal decompression logic with flag handling."""
+        from arrdipi.errors import MppcDecompressError
+
+        # Handle PACKET_FLUSHED: reinitialize history buffer
+        if compression_flags & PACKET_FLUSHED:
+            self._history = bytearray(self._history_size)
+            self._offset = 0
+
+        # Handle PACKET_AT_FRONT: reset offset to beginning
+        if compression_flags & PACKET_AT_FRONT:
+            self._offset = 0
+
+        # If PACKET_COMPRESSED is NOT set, data is uncompressed literal
+        # Store it in history and return as-is
+        if not (compression_flags & PACKET_COMPRESSED):
+            if self._offset + len(data) > self._history_size:
+                raise MppcDecompressError(
+                    "Uncompressed data exceeds history buffer capacity"
+                )
+            self._history[self._offset:self._offset + len(data)] = data
+            self._offset += len(data)
+            return data
+
+        # PACKET_COMPRESSED is set — perform Huffman + LZ77 decompression
+        reader = _BitReader(data)
+        output = bytearray()
+
+        while reader.bits_remaining > 0:
+            try:
+                bit = reader.read_bit()
+            except DecompressionError:
+                break
+
+            if bit == 0:
+                # Literal byte: 0-prefix + 8-bit value
+                if reader.bits_remaining < 8:
+                    break
+                byte_val = reader.read_bits(8)
+                if self._offset >= self._history_size:
+                    raise MppcDecompressError(
+                        "History buffer overflow during decompression"
+                    )
+                self._history[self._offset] = byte_val
+                self._offset += 1
+                output.append(byte_val)
+            else:
+                # Match: 1-prefix + offset + length
+                try:
+                    offset = self._decode_offset(reader)
+                    length = self._decode_length(reader)
+                except DecompressionError as e:
+                    if "Unexpected end" in str(e):
+                        # Ran into padding bits at end of stream
+                        break
+                    raise MppcDecompressError(str(e)) from e
+
+                if offset == 0:
+                    raise MppcDecompressError(
+                        "Invalid zero offset in compressed data"
+                    )
+
+                # Copy from history (supports overlapping/run-length copies)
+                src_pos = self._offset - offset
+                if src_pos < 0:
+                    raise MppcDecompressError(
+                        f"Offset {offset} exceeds available history "
+                        f"(current position: {self._offset})"
+                    )
+
+                for _ in range(length):
+                    if self._offset >= self._history_size:
+                        raise MppcDecompressError(
+                            "History buffer overflow during decompression"
+                        )
+                    byte_val = self._history[src_pos]
+                    self._history[self._offset] = byte_val
+                    self._offset += 1
+                    output.append(byte_val)
+                    src_pos += 1
+
+        return bytes(output)
+
+    def _decode_offset(self, reader: _BitReader) -> int:
+        """Decode copy-offset from the bit stream.
+
+        Copy-offset encoding for RDP 5.0 (64KB window) per [MS-RDPBCGR] 3.1.8.4.2:
+          11 + 6 bits:   offset 0-63
+          10 + 8 bits:   offset 64-319
+          0 + 16 bits:   offset 320-65535
+        """
+        bit1 = reader.read_bit()
+        if bit1 == 0:
+            # 0 + 16 bits -> offset 320-65535
+            return reader.read_bits(16) + 320
+        # bit1 == 1
+        bit2 = reader.read_bit()
+        if bit2 == 1:
+            # 11 + 6 bits -> offset 0-63
+            return reader.read_bits(6)
+        else:
+            # 10 + 8 bits -> offset 64-319
+            return reader.read_bits(8) + 64
+
+    def _decode_length(self, reader: _BitReader) -> int:
+        """Decode match length from the bit stream.
+
+        Length encoding per [MS-RDPBCGR] 3.1.8.4.2:
+          0:                  length = 3
+          10 + 2 bits:        length = value + 4 (4-7)
+          110 + 3 bits:       length = value + 8 (8-15)
+          1110 + 4 bits:      length = value + 16 (16-31)
+          11110 + 5 bits:     length = value + 32 (32-63)
+          111110 + 6 bits:    length = value + 64 (64-127)
+          1111110 + 7 bits:   length = value + 128 (128-255)
+          11111110 + 8 bits:  length = value + 256 (256-511)
+          111111110 + 9 bits: length = value + 512 (512-1023)
+          1111111110 + 10 bits: length = value + 1024 (1024-2047)
+          11111111110 + 11 bits: length = value + 2048 (2048-4095)
+        """
+        bit = reader.read_bit()
+        if bit == 0:
+            return 3
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(2) + 4
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(3) + 8
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(4) + 16
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(5) + 32
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(6) + 64
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(7) + 128
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(8) + 256
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(9) + 512
+
+        bit = reader.read_bit()
+        if bit == 0:
+            return reader.read_bits(10) + 1024
+
+        # 11111111110 + 11 bits
+        return reader.read_bits(11) + 2048
+
+    def reset(self) -> None:
+        """Reset the history buffer for recovery from corruption."""
+        self._history = bytearray(self._history_size)
+        self._offset = 0

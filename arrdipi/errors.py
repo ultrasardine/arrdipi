@@ -98,6 +98,28 @@ class DecompressionError(ArrdipiError):
         super().__init__(message)
 
 
+class MppcDecompressError(ArrdipiError):
+    """Raised when MPPC bulk decompression fails.
+
+    Used by MppcDecompressor per [MS-RDPBCGR] 3.1.8 when the
+    compressed data stream is corrupted or the history buffer overflows.
+    """
+
+    def __init__(self, message: str = "MPPC decompression failed") -> None:
+        super().__init__(message)
+
+
+class CodecError(ArrdipiError):
+    """Raised when a bitmap codec encounters an error during decompression.
+
+    Used by Rdp6BitmapCodec and other codecs when the compressed data
+    stream is malformed, truncated, or otherwise invalid.
+    """
+
+    def __init__(self, message: str = "Codec decompression failed") -> None:
+        super().__init__(message)
+
+
 class RleDecodeError(ArrdipiError):
     """Raised when RLE bitmap decompression fails."""
 

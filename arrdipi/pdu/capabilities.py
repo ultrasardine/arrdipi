@@ -367,6 +367,34 @@ class VirtualChannelCapabilitySet(Pdu):
 
 
 @dataclass
+class MultifragmentUpdateCapabilitySet(Pdu):
+    """Multifragment Update Capability Set [MS-RDPBCGR] 2.2.7.2.6.
+
+    Type: CAPSTYPE_MULTIFRAGMENTUPDATE (0x001A)
+
+    Advertises the maximum size of a reassembled fast-path update PDU
+    that the client is willing to accept.
+    """
+
+    max_request_size: int = 262144  # 256 KB
+
+    @classmethod
+    def parse(cls, data: bytes) -> Self:
+        """Parse MultifragmentUpdateCapabilitySet from payload (after capability header)."""
+        reader = ByteReader(data, pdu_type="MultifragmentUpdateCapabilitySet")
+        return cls(max_request_size=reader.read_u32_le())
+
+    def serialize(self) -> bytes:
+        """Serialize MultifragmentUpdateCapabilitySet to payload bytes (without header).
+
+        Total payload: 4 bytes (MaxRequestSize u32 LE).
+        """
+        writer = ByteWriter()
+        writer.write_u32_le(self.max_request_size)
+        return writer.to_bytes()
+
+
+@dataclass
 class BitmapCodecEntry:
     """A single bitmap codec entry within BitmapCodecsCapabilitySet."""
 
@@ -434,6 +462,7 @@ _CAPABILITY_PARSERS: dict[CapabilitySetType, type[Pdu]] = {
     CapabilitySetType.INPUT: InputCapabilitySet,
     CapabilitySetType.POINTER: PointerCapabilitySet,
     CapabilitySetType.VIRTUAL_CHANNEL: VirtualChannelCapabilitySet,
+    CapabilitySetType.MULTIFRAGMENT_UPDATE: MultifragmentUpdateCapabilitySet,
     CapabilitySetType.BITMAP_CODECS: BitmapCodecsCapabilitySet,
 }
 
@@ -739,5 +768,12 @@ def build_client_capabilities(
         vc_chunk_size=1600,
     )
     caps.append((CapabilitySetType.VIRTUAL_CHANNEL, virtual_channel))
+
+    # Multifragment Update capability set — MS-RDPBCGR 2.2.7.2.6 (payload: 4 bytes)
+    # MaxRequestSize must match self._max_request_size in Session (262144 = 256 KB)
+    multifragment = MultifragmentUpdateCapabilitySet(
+        max_request_size=262144,
+    )
+    caps.append((CapabilitySetType.MULTIFRAGMENT_UPDATE, multifragment))
 
     return caps

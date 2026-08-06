@@ -131,26 +131,102 @@ class TestBoundsChecking:
         return GraphicsSurface(100, 100)
 
     @pytest.mark.asyncio
-    async def test_write_exceeds_width(self, surface: GraphicsSurface) -> None:
-        pixels = bytes([0] * (20 * 10 * 4))
-        with pytest.raises(ValueError, match="exceeds surface bounds"):
-            await surface.write_pixels(90, 0, 20, 10, pixels)
+    async def test_write_exceeds_width_is_clamped(self, surface: GraphicsSurface) -> None:
+        """A rect partially exceeding the right edge is clamped."""
+        # Write 20 wide starting at x=90, only 10 columns fit.
+        pixels = bytes([255, 0, 0, 255] * (20 * 10))  # 20w x 10h
+        await surface.write_pixels(90, 0, 20, 10, pixels)
+        # Only x=90..99 should be written (10 px wide)
+        result = await surface.read_pixels(90, 0, 10, 10)
+        # Each row in the source starts at offset 0 (first 10 pixels of each 20-wide row)
+        expected = bytearray()
+        for row in range(10):
+            for col in range(10):
+                expected.extend([255, 0, 0, 255])
+        assert result == bytes(expected)
 
     @pytest.mark.asyncio
-    async def test_write_exceeds_height(self, surface: GraphicsSurface) -> None:
-        pixels = bytes([0] * (10 * 20 * 4))
-        with pytest.raises(ValueError, match="exceeds surface bounds"):
-            await surface.write_pixels(0, 90, 10, 20, pixels)
+    async def test_write_exceeds_height_is_clamped(self, surface: GraphicsSurface) -> None:
+        """A rect partially exceeding the bottom edge is clamped."""
+        # Write 10 tall starting at y=95, only 5 rows fit.
+        pixels = bytes([0, 255, 0, 255] * (10 * 10))  # 10w x 10h
+        await surface.write_pixels(0, 95, 10, 10, pixels)
+        # Only y=95..99 should be written (5 rows)
+        result = await surface.read_pixels(0, 95, 10, 5)
+        expected = bytes([0, 255, 0, 255] * (10 * 5))
+        assert result == expected
 
     @pytest.mark.asyncio
-    async def test_write_negative_x(self, surface: GraphicsSurface) -> None:
-        with pytest.raises(ValueError, match="Invalid write region"):
-            await surface.write_pixels(-1, 0, 1, 1, bytes([0, 0, 0, 0]))
+    async def test_write_completely_outside_right(self, surface: GraphicsSurface) -> None:
+        """A rect starting at x=100 is completely outside and skipped."""
+        pixels = bytes([255] * (5 * 5 * 4))
+        await surface.write_pixels(100, 0, 5, 5, pixels)
+        # No dirty rects should be recorded
+        assert surface.get_dirty_rects() == []
 
     @pytest.mark.asyncio
-    async def test_write_negative_y(self, surface: GraphicsSurface) -> None:
-        with pytest.raises(ValueError, match="Invalid write region"):
-            await surface.write_pixels(0, -1, 1, 1, bytes([0, 0, 0, 0]))
+    async def test_write_completely_outside_bottom(self, surface: GraphicsSurface) -> None:
+        """A rect starting at y=100 is completely outside and skipped."""
+        pixels = bytes([255] * (5 * 5 * 4))
+        await surface.write_pixels(0, 100, 5, 5, pixels)
+        assert surface.get_dirty_rects() == []
+
+    @pytest.mark.asyncio
+    async def test_write_completely_outside_negative_x(self, surface: GraphicsSurface) -> None:
+        """A rect ending before x=0 is completely outside and skipped."""
+        pixels = bytes([255] * (5 * 5 * 4))
+        await surface.write_pixels(-10, 0, 5, 5, pixels)
+        assert surface.get_dirty_rects() == []
+
+    @pytest.mark.asyncio
+    async def test_write_completely_outside_negative_y(self, surface: GraphicsSurface) -> None:
+        """A rect ending before y=0 is completely outside and skipped."""
+        pixels = bytes([255] * (5 * 5 * 4))
+        await surface.write_pixels(0, -10, 5, 5, pixels)
+        assert surface.get_dirty_rects() == []
+
+    @pytest.mark.asyncio
+    async def test_write_partially_negative_x_is_clamped(self, surface: GraphicsSurface) -> None:
+        """A rect starting at negative x but overlapping the surface is clamped."""
+        # Start at x=-5, width=10 → valid portion is x=0..4 (5 pixels wide)
+        pixels = bytes([i % 256 for i in range(10 * 5 * 4)])  # 10w x 5h
+        await surface.write_pixels(-5, 0, 10, 5, pixels)
+        result = await surface.read_pixels(0, 0, 5, 5)
+        # The clamped region starts at src_x_offset=5 in the original buffer
+        expected = bytearray()
+        src_stride = 10 * 4
+        for row in range(5):
+            src_offset = row * src_stride + 5 * 4
+            expected.extend(pixels[src_offset : src_offset + 5 * 4])
+        assert result == bytes(expected)
+
+    @pytest.mark.asyncio
+    async def test_write_partially_negative_y_is_clamped(self, surface: GraphicsSurface) -> None:
+        """A rect starting at negative y but overlapping the surface is clamped."""
+        # Start at y=-3, height=8 → valid portion is y=0..4 (5 rows)
+        pixels = bytes([i % 256 for i in range(5 * 8 * 4)])  # 5w x 8h
+        await surface.write_pixels(0, -3, 5, 8, pixels)
+        result = await surface.read_pixels(0, 0, 5, 5)
+        # Skip first 3 rows of source (src_y_offset=3)
+        expected = bytearray()
+        src_stride = 5 * 4
+        for row in range(5):
+            src_row = 3 + row
+            src_offset = src_row * src_stride
+            expected.extend(pixels[src_offset : src_offset + src_stride])
+        assert result == bytes(expected)
+
+    @pytest.mark.asyncio
+    async def test_write_at_exact_boundary(self, surface: GraphicsSurface) -> None:
+        """A rect exactly at the edge is valid — no clamping needed."""
+        # Write 10x10 at (90, 90) — fits exactly in 100x100 surface
+        pixels = bytes([42] * (10 * 10 * 4))
+        await surface.write_pixels(90, 90, 10, 10, pixels)
+        result = await surface.read_pixels(90, 90, 10, 10)
+        assert result == pixels
+        rects = surface.get_dirty_rects()
+        assert len(rects) == 1
+        assert rects[0] == Rect(90, 90, 10, 10)
 
     @pytest.mark.asyncio
     async def test_write_zero_width(self, surface: GraphicsSurface) -> None:
@@ -186,6 +262,18 @@ class TestBoundsChecking:
     async def test_read_zero_dimensions(self, surface: GraphicsSurface) -> None:
         with pytest.raises(ValueError, match="Invalid read region"):
             await surface.read_pixels(0, 0, 0, 1)
+
+    @pytest.mark.asyncio
+    async def test_clamped_write_dirty_rect_reflects_clamped_region(
+        self, surface: GraphicsSurface
+    ) -> None:
+        """Dirty rect should reflect the clamped region, not the original."""
+        pixels = bytes([0] * (20 * 20 * 4))
+        await surface.write_pixels(90, 90, 20, 20, pixels)
+        rects = surface.get_dirty_rects()
+        assert len(rects) == 1
+        # Clamped to (90, 90, 10, 10)
+        assert rects[0] == Rect(90, 90, 10, 10)
 
 
 # --- Dirty rect tracking tests ---

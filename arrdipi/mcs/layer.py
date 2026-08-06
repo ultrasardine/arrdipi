@@ -766,6 +766,26 @@ class McsLayer:
         pdu = _build_send_data_request(self._user_channel_id, channel_id, data)
         await self._x224.send_pdu(pdu)
 
+    def parse_send_data_indication(self, data: bytes) -> tuple[int, bytes]:
+        """Parse an MCS SendDataIndication PDU without performing transport I/O.
+
+        Uses the same parsing logic as recv_pdu() but operates on pre-read
+        bytes, allowing the session dispatch loop to extract channel_id and
+        payload from slow-path data received via X224Layer.recv_any().
+
+        (Req 7, AC 1–3)
+
+        Args:
+            data: Raw MCS SendDataIndication bytes (type byte 0x68 + PER fields).
+
+        Returns:
+            Tuple of (channel_id, user_data_payload).
+
+        Raises:
+            ValueError: If the data is malformed or has an unexpected type byte.
+        """
+        return _parse_send_data_indication(data)
+
     async def recv_pdu(self) -> tuple[int, bytes]:
         """Receive an MCS Send Data Indication and demultiplex.
 

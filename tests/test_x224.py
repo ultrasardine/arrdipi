@@ -586,3 +586,151 @@ class TestX224LayerDataPdu:
         # 4 (TPKT) + 3 (X.224 Data header) + 0 (payload) = 7
         total_length = struct.unpack(">H", sent_data[2:4])[0]
         assert total_length == 7
+
+
+
+# --- X224Layer.recv_any() tests ---
+
+
+class TestX224LayerRecvAny:
+    """Tests for X224Layer.recv_any() — dual-path receive method."""
+
+    @pytest.mark.asyncio
+    async def test_recv_any_tpkt_frame_returns_false_and_payload(self):
+        """recv_any returns (False, payload) for a TPKT frame."""
+        mock_tcp = _make_mock_tcp()
+        layer = X224Layer(mock_tcp)
+
+        payload = b"\xAA\xBB\xCC\xDD"
+        data_header = X224_DATA_HEADER  # [0x02, 0xF0, 0x80]
+        tpkt_payload = data_header + payload
+        total_length = TPKT_HEADER_SIZE + len(tpkt_payload)
+        tpkt_header = struct.pack(">BBH", TPKT_VERSION, 0, total_length)
+
+        # recv_any reads: 1 byte (first byte), 3 bytes (rest of TPKT header), then payload
+        mock_tcp.recv = AsyncMock(
+            side_effect=[tpkt_header[:1], tpkt_header[1:], tpkt_payload]
+        )
+
+        is_fp, data = await layer.recv_any()
+        assert is_fp is False
+        assert data == payload
+
+    @pytest.mark.asyncio
+    async def test_recv_any_fast_path_single_byte_length(self):
+        """recv_any returns (True, full_frame) for fast-path with single-byte length."""
+        mock_tcp = _make_mock_tcp()
+        layer = X224Layer(mock_tcp)
+
+        # Fast-path frame: first_byte=0x00 (action=fast-path), length1=0x0A (10 bytes total)
+        # Frame payload = 10 - 2 (header consumed) = 8 bytes
+        first_byte = b"\x00"
+        length1 = b"\x0A"  # 10 total
+        fp_payload = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+
+        mock_tcp.recv = AsyncMock(
+            side_effect=[first_byte, length1, fp_payload]
+        )
+
+        is_fp, data = await layer.recv_any()
+        assert is_fp is True
+        # Complete frame: first_byte + length1 + payload
+        assert data == first_byte + length1 + fp_payload
+
+    @pytest.mark.asyncio
+    async def test_recv_any_fast_path_two_byte_length(self):
+        """recv_any returns (True, full_frame) for fast-path with two-byte length."""
+        mock_tcp = _make_mock_tcp()
+        layer = X224Layer(mock_tcp)
+
+        # Fast-path frame: first_byte=0x00, length1=0x81 (MSB set → two-byte),
+        # length2=0x00 → total = ((0x81 & 0x7F) << 8) | 0x00 = 0x0100 = 256 bytes
+        first_byte = b"\x00"
+        length1 = b"\x81"
+        length2 = b"\x00"
+        # Remaining payload: 256 - 3 (header) = 253 bytes
+        fp_payload = b"\xAB" * 253
+
+        mock_tcp.recv = AsyncMock(
+            side_effect=[first_byte, length1, length2, fp_payload]
+        )
+
+        is_fp, data = await layer.recv_any()
+        assert is_fp is True
+        assert data == first_byte + length1 + length2 + fp_payload
+        assert len(data) == 256
+
+    @pytest.mark.asyncio
+    async def test_recv_any_fast_path_minimal_frame(self):
+        """recv_any handles a minimal fast-path frame (no payload beyond header)."""
+        mock_tcp = _make_mock_tcp()
+        layer = X224Layer(mock_tcp)
+
+        # Minimal: first_byte=0x04, length1=0x02 (total 2 bytes, so remaining=0)
+        first_byte = b"\x04"
+        length1 = b"\x02"
+
+        mock_tcp.recv = AsyncMock(
+            side_effect=[first_byte, length1]
+        )
+
+        is_fp, data = await layer.recv_any()
+        assert is_fp is True
+        assert data == first_byte + length1
+
+    @pytest.mark.asyncio
+    async def test_recv_any_fast_path_preserves_first_byte(self):
+        """recv_any includes the first byte (fpOutputHeader) in the returned data."""
+        mock_tcp = _make_mock_tcp()
+        layer = X224Layer(mock_tcp)
+
+        # First byte with action=0 (fast-path), flags in bits 6-7
+        first_byte = b"\xC0"  # flags=0x03 in bits 6-7
+        length1 = b"\x05"  # total length 5
+        fp_payload = b"\xDE\xAD\xBE"  # 5 - 2 = 3 bytes
+
+        mock_tcp.recv = AsyncMock(
+            side_effect=[first_byte, length1, fp_payload]
+        )
+
+        is_fp, data = await layer.recv_any()
+        assert is_fp is True
+        assert data[0] == 0xC0
+        assert data == b"\xC0\x05\xDE\xAD\xBE"
+
+    @pytest.mark.asyncio
+    async def test_recv_any_tpkt_invalid_tpdu_code_raises(self):
+        """recv_any raises ValueError for a TPKT frame with non-Data TPDU code."""
+        mock_tcp = _make_mock_tcp()
+        layer = X224Layer(mock_tcp)
+
+        bad_payload = bytes([0x02, 0xE0, 0x80]) + b"\x01\x02"
+        total_length = TPKT_HEADER_SIZE + len(bad_payload)
+        tpkt_header = struct.pack(">BBH", TPKT_VERSION, 0, total_length)
+
+        mock_tcp.recv = AsyncMock(
+            side_effect=[tpkt_header[:1], tpkt_header[1:], bad_payload]
+        )
+
+        with pytest.raises(ValueError, match="Expected Data TPDU"):
+            await layer.recv_any()
+
+    @pytest.mark.asyncio
+    async def test_recv_any_does_not_affect_recv_pdu(self):
+        """recv_pdu still works independently after recv_any is added."""
+        mock_tcp = _make_mock_tcp()
+        layer = X224Layer(mock_tcp)
+
+        payload = b"\x11\x22\x33"
+        data_header = X224_DATA_HEADER
+        tpkt_payload = data_header + payload
+        total_length = TPKT_HEADER_SIZE + len(tpkt_payload)
+        tpkt_header = struct.pack(">BBH", TPKT_VERSION, 0, total_length)
+
+        mock_tcp.recv = AsyncMock(
+            side_effect=[tpkt_header[:1], tpkt_header[1:], tpkt_payload]
+        )
+
+        # recv_pdu should still work as before
+        result = await layer.recv_pdu()
+        assert result == payload

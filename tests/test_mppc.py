@@ -346,3 +346,206 @@ class TestMppcKnownVectors:
         compressed, flags = compressor.compress(original)
         result = decompressor.decompress(compressed, flags)
         assert result == original
+
+
+# --- Tests for MppcDecompressor (design-specified interface) ---
+
+from arrdipi.codec.mppc import MppcDecompressor
+from arrdipi.errors import MppcDecompressError
+
+
+class TestMppcDecompressorInit:
+    """Test MppcDecompressor initialization (Task 4.2)."""
+
+    def test_default_history_size(self) -> None:
+        """Default history buffer is 64KB."""
+        d = MppcDecompressor()
+        assert len(d._history) == 65536
+        assert d._history_size == 65536
+
+    def test_custom_history_size(self) -> None:
+        """Custom history size is respected."""
+        d = MppcDecompressor(history_size=8192)
+        assert len(d._history) == 8192
+        assert d._history_size == 8192
+
+    def test_offset_starts_at_zero(self) -> None:
+        """History offset starts at beginning."""
+        d = MppcDecompressor()
+        assert d._offset == 0
+
+
+class TestMppcDecompressorFlags:
+    """Test compression flag handling (Task 4.3)."""
+
+    def test_uncompressed_passthrough(self) -> None:
+        """When PACKET_COMPRESSED not set, data stored in history and returned as-is."""
+        d = MppcDecompressor()
+        data = b"hello world"
+        # No PACKET_COMPRESSED flag — just AT_FRONT
+        result = d.decompress(PACKET_AT_FRONT, data)
+        assert result == data
+        # Verify data was stored in history
+        assert d._history[:len(data)] == data
+        assert d._offset == len(data)
+
+    def test_flushed_resets_history(self) -> None:
+        """PACKET_FLUSHED reinitializes history buffer."""
+        d = MppcDecompressor()
+        # Store some data first
+        d.decompress(PACKET_AT_FRONT, b"initial data")
+        assert d._offset > 0
+
+        # Flush and send new uncompressed data
+        result = d.decompress(PACKET_FLUSHED, b"fresh")
+        assert result == b"fresh"
+        # Offset should be at len("fresh") after flush + store
+        assert d._offset == 5
+
+    def test_at_front_resets_offset(self) -> None:
+        """PACKET_AT_FRONT resets offset to beginning of history."""
+        d = MppcDecompressor()
+        # Store data without AT_FRONT to advance offset
+        d.decompress(0, b"first chunk")
+        saved_offset = d._offset
+        assert saved_offset > 0
+
+        # Now send with AT_FRONT — offset resets before storing
+        result = d.decompress(PACKET_AT_FRONT, b"second")
+        assert result == b"second"
+        assert d._offset == 6  # len("second")
+
+    def test_flushed_and_compressed(self) -> None:
+        """PACKET_FLUSHED + PACKET_COMPRESSED: flush then decompress."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        # Put some garbage in decompressor's history
+        d.decompress(PACKET_AT_FRONT, b"garbage" * 100)
+
+        # Compress fresh data
+        original = b"ABCABCABCABCABCABCABCABCABCABCABCABCABCABCABCABC"
+        compressed, flags = compressor.compress(original)
+
+        # Set FLUSHED flag to simulate server reset
+        result = d.decompress(PACKET_FLUSHED | PACKET_COMPRESSED | PACKET_AT_FRONT, compressed)
+        assert result == original
+
+
+class TestMppcDecompressorRoundTrip:
+    """Test compress (via MppcCompressor) + decompress (via MppcDecompressor) round-trip (Task 4.4)."""
+
+    def test_single_byte(self) -> None:
+        """Single byte round-trips correctly."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        original = b"\x42"
+        compressed, flags = compressor.compress(original)
+        result = d.decompress(flags, compressed)
+        assert result == original
+
+    def test_short_data(self) -> None:
+        """Short non-repeating data round-trips correctly."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        original = b"Hello, World!"
+        compressed, flags = compressor.compress(original)
+        result = d.decompress(flags, compressed)
+        assert result == original
+
+    def test_repetitive_data(self) -> None:
+        """Repetitive data compresses and decompresses correctly."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        original = b"ABCABCABCABCABCABCABCABCABCABCABCABCABCABCABCABC"
+        compressed, flags = compressor.compress(original)
+        assert flags & PACKET_COMPRESSED
+        result = d.decompress(flags, compressed)
+        assert result == original
+
+    def test_binary_data(self) -> None:
+        """Binary data round-trips correctly."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        original = bytes(range(256)) * 4
+        compressed, flags = compressor.compress(original)
+        result = d.decompress(flags, compressed)
+        assert result == original
+
+    def test_all_same_bytes(self) -> None:
+        """Run-length encoding pattern round-trips."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        original = b"\x00" * 1000
+        compressed, flags = compressor.compress(original)
+        result = d.decompress(flags, compressed)
+        assert result == original
+
+    def test_history_persistence_across_calls(self) -> None:
+        """History state persists across multiple decompress calls."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        messages = [
+            b"First message with some content here",
+            b"Second message with some content here",  # shares prefix
+            b"Third completely different payload!",
+        ]
+
+        for msg in messages:
+            compressed, flags = compressor.compress(msg)
+            result = d.decompress(flags, compressed)
+            assert result == msg
+
+    def test_large_data_with_matches(self) -> None:
+        """Large data with distant back-references."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        pattern = b"UNIQUE_PATTERN_XYZ"
+        padding = bytes(range(256)) * 20  # ~5KB
+        original = pattern + padding + pattern
+
+        compressed, flags = compressor.compress(original)
+        result = d.decompress(flags, compressed)
+        assert result == original
+
+
+class TestMppcDecompressorErrors:
+    """Test error handling (Task 4.5 — MppcDecompressError)."""
+
+    def test_corrupted_data_raises_mppc_error(self) -> None:
+        """Corrupted compressed data raises MppcDecompressError."""
+        d = MppcDecompressor()
+        corrupted = b"\xff\xff\xff\xff\xff\xff\xff\xff"
+        with pytest.raises(MppcDecompressError):
+            d.decompress(PACKET_COMPRESSED | PACKET_AT_FRONT, corrupted)
+
+    def test_overflow_uncompressed_raises_error(self) -> None:
+        """Uncompressed data exceeding history raises MppcDecompressError."""
+        d = MppcDecompressor(history_size=16)
+        with pytest.raises(MppcDecompressError):
+            d.decompress(PACKET_AT_FRONT, b"x" * 20)
+
+    def test_reset_after_error(self) -> None:
+        """Decompressor can be reset and used again after an error."""
+        compressor = MppcCompressor()
+        d = MppcDecompressor()
+
+        # Trigger an error
+        with pytest.raises(MppcDecompressError):
+            d.decompress(PACKET_COMPRESSED | PACKET_AT_FRONT, b"\xff" * 8)
+
+        # Reset and try again
+        d.reset()
+        compressor.reset()
+
+        original = b"ABCABCABCABCABCABCABCABCABCABCABCABCABCABCABCABC"
+        compressed, flags = compressor.compress(original)
+        result = d.decompress(flags | PACKET_FLUSHED, compressed)
+        assert result == original

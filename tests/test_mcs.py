@@ -601,6 +601,116 @@ async def test_send_to_channel():
     assert sent_data.endswith(payload)
 
 
+class TestParseSendDataIndication:
+    """Test McsLayer.parse_send_data_indication() (synchronous, no I/O)."""
+
+    def test_extracts_channel_id_and_payload(self):
+        """parse_send_data_indication extracts channel_id and payload from known bytes."""
+        from arrdipi.mcs.layer import _per_encode_length, _per_encode_u16
+
+        payload = b"\xDE\xAD\xBE\xEF\xCA\xFE"
+        indication = (
+            b"\x68"
+            + _per_encode_u16(6)  # user channel ID (1007 - 1001)
+            + _per_encode_u16(1003)  # channel ID
+            + b"\x70"  # priority + segmentation
+            + _per_encode_length(len(payload))
+            + payload
+        )
+
+        mock_x224 = _make_mock_x224()
+        mcs = McsLayer(mock_x224)
+
+        channel_id, result_payload = mcs.parse_send_data_indication(indication)
+        assert channel_id == 1003
+        assert result_payload == payload
+
+    def test_different_channel_id(self):
+        """parse_send_data_indication handles various channel IDs correctly."""
+        from arrdipi.mcs.layer import _per_encode_length, _per_encode_u16
+
+        payload = b"\x01\x02\x03"
+        indication = (
+            b"\x68"
+            + _per_encode_u16(10)  # user channel ID (1011 - 1001)
+            + _per_encode_u16(1005)  # channel ID
+            + b"\x70"  # priority + segmentation
+            + _per_encode_length(len(payload))
+            + payload
+        )
+
+        mock_x224 = _make_mock_x224()
+        mcs = McsLayer(mock_x224)
+
+        channel_id, result_payload = mcs.parse_send_data_indication(indication)
+        assert channel_id == 1005
+        assert result_payload == payload
+
+    def test_large_payload_two_byte_length(self):
+        """parse_send_data_indication handles PER two-byte length encoding."""
+        from arrdipi.mcs.layer import _per_encode_length, _per_encode_u16
+
+        # Payload larger than 127 bytes requires two-byte PER length
+        payload = b"\xAA" * 200
+        indication = (
+            b"\x68"
+            + _per_encode_u16(6)  # user channel ID
+            + _per_encode_u16(1003)  # channel ID
+            + b"\x70"  # priority + segmentation
+            + _per_encode_length(len(payload))
+            + payload
+        )
+
+        mock_x224 = _make_mock_x224()
+        mcs = McsLayer(mock_x224)
+
+        channel_id, result_payload = mcs.parse_send_data_indication(indication)
+        assert channel_id == 1003
+        assert result_payload == payload
+        assert len(result_payload) == 200
+
+    def test_wrong_type_byte_raises(self):
+        """parse_send_data_indication raises ValueError for wrong type byte."""
+        mock_x224 = _make_mock_x224()
+        mcs = McsLayer(mock_x224)
+
+        # Type byte 0x64 is Send Data Request, not Indication (0x68)
+        data = b"\x64\x00\x06\x03\xEB\x70\x04\x01\x02\x03\x04"
+        with pytest.raises(ValueError, match="unexpected type byte"):
+            mcs.parse_send_data_indication(data)
+
+    def test_too_short_data_raises(self):
+        """parse_send_data_indication raises ValueError for truncated data."""
+        mock_x224 = _make_mock_x224()
+        mcs = McsLayer(mock_x224)
+
+        with pytest.raises(ValueError, match="data too short"):
+            mcs.parse_send_data_indication(b"\x68\x00\x06")
+
+    def test_no_io_performed(self):
+        """parse_send_data_indication does not call any I/O methods on X224Layer."""
+        mock_x224 = _make_mock_x224()
+        mcs = McsLayer(mock_x224)
+
+        from arrdipi.mcs.layer import _per_encode_length, _per_encode_u16
+
+        payload = b"\x01"
+        indication = (
+            b"\x68"
+            + _per_encode_u16(6)
+            + _per_encode_u16(1003)
+            + b"\x70"
+            + _per_encode_length(len(payload))
+            + payload
+        )
+
+        mcs.parse_send_data_indication(indication)
+
+        # Verify no transport I/O was performed
+        mock_x224.recv_pdu.assert_not_called()
+        mock_x224.send_pdu.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_recv_pdu_demux():
     """recv_pdu demultiplexes and returns (channel_id, payload)."""

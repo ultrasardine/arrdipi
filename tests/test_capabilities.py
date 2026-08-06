@@ -27,6 +27,7 @@ from arrdipi.pdu.capabilities import (
     DemandActivePdu,
     GeneralCapabilitySet,
     InputCapabilitySet,
+    MultifragmentUpdateCapabilitySet,
     OrderCapabilitySet,
     PointerCapabilitySet,
     VirtualChannelCapabilitySet,
@@ -226,6 +227,75 @@ class TestBitmapCodecsCapabilitySetRoundTrip:
         assert parsed.codecs[1].codec_properties == b""
 
 
+class TestMultifragmentUpdateCapabilitySet:
+    """Tests for MultifragmentUpdateCapabilitySet [MS-RDPBCGR] 2.2.7.2.6 (Req 6, AC 7)."""
+
+    def test_default_round_trip(self) -> None:
+        """Verify default MaxRequestSize (262144) round-trips correctly."""
+        cap = MultifragmentUpdateCapabilitySet()
+        data = cap.serialize()
+        parsed = MultifragmentUpdateCapabilitySet.parse(data)
+        assert parsed == cap
+        assert parsed.max_request_size == 262144
+
+    def test_custom_max_request_size(self) -> None:
+        """Verify custom MaxRequestSize round-trips correctly."""
+        cap = MultifragmentUpdateCapabilitySet(max_request_size=1048576)
+        data = cap.serialize()
+        parsed = MultifragmentUpdateCapabilitySet.parse(data)
+        assert parsed.max_request_size == 1048576
+
+    def test_serialize_size(self) -> None:
+        """Payload is exactly 4 bytes (one u32 LE for MaxRequestSize)."""
+        cap = MultifragmentUpdateCapabilitySet()
+        data = cap.serialize()
+        assert len(data) == 4
+
+    def test_serialize_wire_format(self) -> None:
+        """Verify exact wire bytes: MaxRequestSize=262144 = 0x00040000 LE."""
+        cap = MultifragmentUpdateCapabilitySet(max_request_size=262144)
+        data = cap.serialize()
+        assert data == struct.pack("<I", 262144)
+
+    def test_serialized_in_confirm_active_pdu(self) -> None:
+        """Verify the capability is correctly serialized inside a ConfirmActivePdu (Req 6, AC 7).
+
+        Per [MS-RDPBCGR] 2.2.7.2.6:
+        - capabilitySetType: u16 LE = 0x001A (CAPSTYPE_MULTIFRAGMENTUPDATE)
+        - lengthCapability: u16 LE = 8 (4 header + 4 payload)
+        - MaxRequestSize: u32 LE = 262144
+        """
+        pdu = ConfirmActivePdu(
+            share_id=0x00010001,
+            capability_sets={
+                CapabilitySetType.MULTIFRAGMENT_UPDATE: MultifragmentUpdateCapabilitySet(
+                    max_request_size=262144,
+                ),
+            },
+        )
+        data = pdu.serialize()
+        parsed = ConfirmActivePdu.parse(data)
+        assert CapabilitySetType.MULTIFRAGMENT_UPDATE in parsed.capability_sets
+        mf_cap = parsed.capability_sets[CapabilitySetType.MULTIFRAGMENT_UPDATE]
+        assert isinstance(mf_cap, MultifragmentUpdateCapabilitySet)
+        assert mf_cap.max_request_size == 262144
+
+        # Also verify the raw bytes contain the expected capability header + payload
+        # Header: type=0x001A (u16 LE) + length=8 (u16 LE) + MaxRequestSize=262144 (u32 LE)
+        expected_cap_bytes = struct.pack("<HHI", 0x001A, 8, 262144)
+        assert expected_cap_bytes in data
+
+    def test_build_client_capabilities_includes_multifragment(self) -> None:
+        """Verify build_client_capabilities includes MULTIFRAGMENT_UPDATE with 262144."""
+        config = ClientCapabilitiesConfig()
+        caps = build_client_capabilities({}, config)
+        cap_types = [t for t, _ in caps]
+        assert CapabilitySetType.MULTIFRAGMENT_UPDATE in cap_types
+        mf_cap = next(c for t, c in caps if t == CapabilitySetType.MULTIFRAGMENT_UPDATE)
+        assert isinstance(mf_cap, MultifragmentUpdateCapabilitySet)
+        assert mf_cap.max_request_size == 262144
+
+
 class TestDemandActivePduRoundTrip:
     """Round-trip tests for DemandActivePdu (Req 7, AC 1)."""
 
@@ -326,6 +396,7 @@ class TestBuildClientCapabilities:
         assert CapabilitySetType.INPUT in cap_types
         assert CapabilitySetType.POINTER in cap_types
         assert CapabilitySetType.VIRTUAL_CHANNEL in cap_types
+        assert CapabilitySetType.MULTIFRAGMENT_UPDATE in cap_types
 
     def test_general_has_fastpath_support(self) -> None:
         """Verify Fast-Path support is advertised in GeneralCapabilitySet (Req 7, AC 4)."""

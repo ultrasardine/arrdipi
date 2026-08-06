@@ -20,6 +20,7 @@ arrdipi provides both a **programmatic async Python API** for building custom RD
 ### Graphics Codecs
 
 - **RLE** — Run-length encoded bitmaps at 8/16/24/32-bit color depths
+- **RDP 6.0 Bitmap** — Planar RGBA decompression for 32 bpp bitmaps per [MS-RDPEGDI] 2.2.2.5.1
 - **RemoteFX** — Wavelet-based codec with RLGR1/RLGR3 entropy coding
 - **NSCodec** — Lossless and near-lossless bitmap compression
 - **H.264/AVC** — Hardware-accelerated decoding via the GFX pipeline (PyAV/FFmpeg)
@@ -37,6 +38,7 @@ arrdipi provides both a **programmatic async Python API** for building custom RD
 
 - Full 10-phase RDP connection sequence per [MS-RDPBCGR] §1.3.1.1
 - Fast-path input/output for low-latency interaction
+- Fast-path graphics pipeline with dual-path dispatch, MPPC decompression, and fragment reassembly
 - Auto-reconnect with server-issued cookies
 - Pointer/cursor caching and rendering (up to 384×384)
 - MPPC bulk data compression (64KB sliding window)
@@ -261,6 +263,8 @@ All exceptions inherit from `ArrdipiError`:
 | `NegotiationError` | SPNEGO/Kerberos negotiation failure |
 | `PduParseError` | Malformed PDU data (includes PDU type, byte offset, description) |
 | `DecompressionError` | MPPC bulk decompression failure |
+| `MppcDecompressError` | MPPC decompressor session error (corrupted stream, overflow) |
+| `CodecError` | Bitmap codec decompression error (RDP 6.0, malformed stream) |
 | `RleDecodeError` | RLE bitmap decode failure (includes rectangle index and byte offset) |
 | `FinalizationTimeoutError` | Server finalization PDUs not received within timeout |
 
@@ -357,7 +361,8 @@ The connection follows the 10-phase sequence defined in [MS-RDPBCGR] §1.3.1.1:
 | Codec | `codec/remotefx.py` | RemoteFX wavelet codec (DWT, RLGR, YCbCr→RGB) |
 | Codec | `codec/nscodec.py` | NSCodec lossy/lossless decompression |
 | Codec | `codec/h264.py` | H.264 NAL unit decoding via PyAV |
-| Codec | `codec/mppc.py` | MPPC bulk compression (64KB sliding window) |
+| Codec | `codec/mppc.py` | MPPC bulk compression/decompression (64KB sliding window) |
+| Codec | `codec/rdp6_bitmap.py` | RDP 6.0 Bitmap Compression (32 bpp planar + RLE) |
 | Graphics | `graphics/surface.py` | RGBA framebuffer with dirty rect tracking |
 | Graphics | `graphics/gdi.py` | GDI drawing order processor with delta encoding |
 | Graphics | `graphics/pointer.py` | Cursor cache and shape decoding |
@@ -523,6 +528,7 @@ arrdipi follows the 10-phase connection sequence defined in [MS-RDPBCGR] §1.3.1
 ### What graphics codecs are supported?
 
 - **RLE** — Basic run-length encoding at all color depths (8/16/24/32-bit)
+- **RDP 6.0 Bitmap** — Planar compression with per-channel RLE for 32 bpp bitmaps
 - **RemoteFX (RFX)** — Wavelet-based codec using RLGR entropy coding and inverse DWT
 - **NSCodec** — Near-lossless codec with lossy and lossless modes
 - **H.264/AVC** — Modern codec via the RDPGFX pipeline, decoded using PyAV/FFmpeg

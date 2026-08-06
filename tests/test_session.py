@@ -45,17 +45,18 @@ from arrdipi.session import Session
 def _make_session(
     fast_path: bool = True,
     channel_map: dict[int, str] | None = None,
-) -> tuple[Session, MagicMock, MagicMock, MagicMock]:
+) -> tuple[Session, MagicMock, MagicMock, MagicMock, MagicMock]:
     """Create a Session with mocked dependencies.
 
     Returns:
-        Tuple of (session, mock_tcp, mock_mcs, mock_security).
+        Tuple of (session, mock_tcp, mock_mcs, mock_security, mock_x224).
     """
     mock_tcp = MagicMock()
     mock_tcp.send = AsyncMock()
     mock_tcp.close = AsyncMock()
 
     mock_x224 = MagicMock()
+    mock_x224.recv_any = AsyncMock()
 
     mock_mcs = MagicMock()
     mock_mcs.user_channel_id = 1007
@@ -95,7 +96,7 @@ def _make_session(
         share_id=0x00010001,
     )
 
-    return session, mock_tcp, mock_mcs, mock_security
+    return session, mock_tcp, mock_mcs, mock_security, mock_x224
 
 
 # ---------------------------------------------------------------------------
@@ -108,34 +109,34 @@ class TestSessionProperties:
 
     def test_surface_property(self) -> None:
         """Session exposes a GraphicsSurface."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         assert session.surface is not None
         assert session.surface.width == 1024
         assert session.surface.height == 768
 
     def test_pointer_property(self) -> None:
         """Session exposes a PointerHandler."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         assert session.pointer is not None
 
     def test_clipboard_initially_none(self) -> None:
         """Clipboard is None before channel initialization."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         assert session.clipboard is None
 
     def test_audio_output_initially_none(self) -> None:
         """Audio output is None before channel initialization."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         assert session.audio_output is None
 
     def test_audio_input_initially_none(self) -> None:
         """Audio input is None before channel initialization."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         assert session.audio_input is None
 
     def test_drive_initially_none(self) -> None:
         """Drive is None before channel initialization."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         assert session.drive is None
 
 
@@ -149,28 +150,28 @@ class TestEventRegistration:
 
     def test_on_graphics_update_registers_callback(self) -> None:
         """on_graphics_update stores the callback."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         callback = AsyncMock()
         session.on_graphics_update(callback)
         assert callback in session._on_graphics_update_callbacks
 
     def test_on_clipboard_changed_registers_callback(self) -> None:
         """on_clipboard_changed stores the callback."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         callback = AsyncMock()
         session.on_clipboard_changed(callback)
         assert callback in session._on_clipboard_changed_callbacks
 
     def test_on_disconnect_registers_callback(self) -> None:
         """on_disconnect stores the callback."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         callback = AsyncMock()
         session.on_disconnect(callback)
         assert callback in session._on_disconnect_callbacks
 
     def test_multiple_callbacks_registered(self) -> None:
         """Multiple callbacks can be registered for the same event."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         cb1 = AsyncMock()
         cb2 = AsyncMock()
         session.on_disconnect(cb1)
@@ -189,7 +190,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_key_press_fast_path(self) -> None:
         """send_key sends a fast-path keyboard event for key press."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_key(scan_code=0x1E, is_released=False)
 
@@ -206,7 +207,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_key_release_fast_path(self) -> None:
         """send_key sends a fast-path keyboard event for key release."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_key(scan_code=0x1E, is_released=True)
 
@@ -220,7 +221,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_key_extended_fast_path(self) -> None:
         """send_key with is_extended sets the extended flag."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_key(scan_code=0x1D, is_released=False, is_extended=True)
 
@@ -233,7 +234,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_unicode_key_fast_path(self) -> None:
         """send_unicode_key sends a fast-path unicode event."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_unicode_key(code_point=0x0041)  # 'A'
 
@@ -247,7 +248,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_mouse_move_fast_path(self) -> None:
         """send_mouse_move sends a fast-path mouse event with MOVE flag."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_mouse_move(x=100, y=200)
 
@@ -263,7 +264,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_mouse_button_press_fast_path(self) -> None:
         """send_mouse_button sends a fast-path mouse event with button + DOWN."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_mouse_button(
             x=50, y=75, button=PointerFlags.PTRFLAGS_BUTTON1, is_released=False
@@ -281,7 +282,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_mouse_button_release_fast_path(self) -> None:
         """send_mouse_button release does not set DOWN flag."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_mouse_button(
             x=50, y=75, button=PointerFlags.PTRFLAGS_BUTTON1, is_released=True
@@ -297,7 +298,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_mouse_scroll_vertical_fast_path(self) -> None:
         """send_mouse_scroll sends vertical scroll with WHEEL flag."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_mouse_scroll(x=100, y=100, delta=3)
 
@@ -311,7 +312,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_mouse_scroll_negative_fast_path(self) -> None:
         """send_mouse_scroll with negative delta sets WHEEL_NEGATIVE."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_mouse_scroll(x=100, y=100, delta=-3)
 
@@ -325,7 +326,7 @@ class TestInputMethodsFastPath:
     @pytest.mark.asyncio
     async def test_send_mouse_scroll_horizontal_fast_path(self) -> None:
         """send_mouse_scroll with is_horizontal sets HWHEEL flag."""
-        session, mock_tcp, _, _ = _make_session(fast_path=True)
+        session, mock_tcp, _, _, _ = _make_session(fast_path=True)
 
         await session.send_mouse_scroll(x=100, y=100, delta=2, is_horizontal=True)
 
@@ -347,7 +348,7 @@ class TestInputMethodsSlowPath:
     @pytest.mark.asyncio
     async def test_send_key_press_slow_path(self) -> None:
         """send_key sends a slow-path keyboard event via MCS."""
-        session, _, mock_mcs, _ = _make_session(fast_path=False)
+        session, _, mock_mcs, _, _ = _make_session(fast_path=False)
 
         await session.send_key(scan_code=0x1E, is_released=False)
 
@@ -359,7 +360,7 @@ class TestInputMethodsSlowPath:
     @pytest.mark.asyncio
     async def test_send_key_release_slow_path(self) -> None:
         """send_key release sends KBDFLAGS_RELEASE in slow-path."""
-        session, _, mock_mcs, _ = _make_session(fast_path=False)
+        session, _, mock_mcs, _, _ = _make_session(fast_path=False)
 
         await session.send_key(scan_code=0x1E, is_released=True)
 
@@ -368,7 +369,7 @@ class TestInputMethodsSlowPath:
     @pytest.mark.asyncio
     async def test_send_unicode_key_slow_path(self) -> None:
         """send_unicode_key sends a slow-path unicode event via MCS."""
-        session, _, mock_mcs, _ = _make_session(fast_path=False)
+        session, _, mock_mcs, _, _ = _make_session(fast_path=False)
 
         await session.send_unicode_key(code_point=0x0041)
 
@@ -377,7 +378,7 @@ class TestInputMethodsSlowPath:
     @pytest.mark.asyncio
     async def test_send_mouse_move_slow_path(self) -> None:
         """send_mouse_move sends a slow-path mouse event via MCS."""
-        session, _, mock_mcs, _ = _make_session(fast_path=False)
+        session, _, mock_mcs, _, _ = _make_session(fast_path=False)
 
         await session.send_mouse_move(x=100, y=200)
 
@@ -386,7 +387,7 @@ class TestInputMethodsSlowPath:
     @pytest.mark.asyncio
     async def test_send_mouse_button_slow_path(self) -> None:
         """send_mouse_button sends a slow-path mouse event via MCS."""
-        session, _, mock_mcs, _ = _make_session(fast_path=False)
+        session, _, mock_mcs, _, _ = _make_session(fast_path=False)
 
         await session.send_mouse_button(
             x=50, y=75, button=PointerFlags.PTRFLAGS_BUTTON1, is_released=False
@@ -397,7 +398,7 @@ class TestInputMethodsSlowPath:
     @pytest.mark.asyncio
     async def test_send_mouse_scroll_slow_path(self) -> None:
         """send_mouse_scroll sends a slow-path mouse event via MCS."""
-        session, _, mock_mcs, _ = _make_session(fast_path=False)
+        session, _, mock_mcs, _, _ = _make_session(fast_path=False)
 
         await session.send_mouse_scroll(x=100, y=100, delta=3)
 
@@ -406,7 +407,7 @@ class TestInputMethodsSlowPath:
     @pytest.mark.asyncio
     async def test_input_not_sent_when_closed(self) -> None:
         """Input methods do nothing when session is closed."""
-        session, mock_tcp, mock_mcs, _ = _make_session(fast_path=True)
+        session, mock_tcp, mock_mcs, _, _ = _make_session(fast_path=True)
         session._closed = True
 
         await session.send_key(scan_code=0x1E, is_released=False)
@@ -430,7 +431,7 @@ class TestClose:
     @pytest.mark.asyncio
     async def test_close_sets_closed_flag(self) -> None:
         """close() sets the closed flag."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         assert not session.closed
 
         await session.close()
@@ -440,7 +441,7 @@ class TestClose:
     @pytest.mark.asyncio
     async def test_close_is_idempotent(self) -> None:
         """close() can be called multiple times without error."""
-        session, mock_tcp, _, _ = _make_session()
+        session, mock_tcp, _, _, _ = _make_session()
 
         await session.close()
         await session.close()
@@ -452,10 +453,10 @@ class TestClose:
     @pytest.mark.asyncio
     async def test_close_cancels_dispatch_task(self) -> None:
         """close() cancels the background dispatch task."""
-        session, _, mock_mcs, _ = _make_session()
+        session, _, mock_mcs, _, mock_x224 = _make_session()
 
         # Simulate a running dispatch task
-        mock_mcs.recv_pdu = AsyncMock(side_effect=asyncio.CancelledError)
+        mock_x224.recv_any = AsyncMock(side_effect=asyncio.CancelledError)
         await session.start()
 
         # Give the task a moment to start
@@ -468,7 +469,7 @@ class TestClose:
     @pytest.mark.asyncio
     async def test_close_closes_tcp(self) -> None:
         """close() closes the TCP connection."""
-        session, mock_tcp, _, _ = _make_session()
+        session, mock_tcp, _, _, _ = _make_session()
 
         await session.close()
 
@@ -486,7 +487,7 @@ class TestDisconnect:
     @pytest.mark.asyncio
     async def test_disconnect_sends_shutdown_request(self) -> None:
         """disconnect() sends a Shutdown Request PDU."""
-        session, _, mock_mcs, _ = _make_session()
+        session, _, mock_mcs, _, _ = _make_session()
 
         await session.disconnect()
 
@@ -498,7 +499,7 @@ class TestDisconnect:
     @pytest.mark.asyncio
     async def test_disconnect_closes_session(self) -> None:
         """disconnect() closes the session after sending shutdown."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
 
         await session.disconnect()
 
@@ -507,7 +508,7 @@ class TestDisconnect:
     @pytest.mark.asyncio
     async def test_disconnect_when_already_closed(self) -> None:
         """disconnect() does nothing when already closed."""
-        session, _, mock_mcs, _ = _make_session()
+        session, _, mock_mcs, _, _ = _make_session()
         session._closed = True
 
         await session.disconnect()
@@ -517,7 +518,7 @@ class TestDisconnect:
     @pytest.mark.asyncio
     async def test_disconnect_handles_connection_error(self) -> None:
         """disconnect() handles connection errors gracefully."""
-        session, _, mock_mcs, _ = _make_session()
+        session, _, mock_mcs, _, _ = _make_session()
         mock_mcs.send_to_channel = AsyncMock(side_effect=ConnectionError("broken"))
 
         # Should not raise
@@ -537,7 +538,7 @@ class TestDisconnectCallback:
     @pytest.mark.asyncio
     async def test_disconnect_callback_invoked(self) -> None:
         """Disconnect callbacks are invoked with the reason."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         callback = AsyncMock()
         session.on_disconnect(callback)
 
@@ -548,7 +549,7 @@ class TestDisconnectCallback:
     @pytest.mark.asyncio
     async def test_multiple_disconnect_callbacks_invoked(self) -> None:
         """All registered disconnect callbacks are invoked."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         cb1 = AsyncMock()
         cb2 = AsyncMock()
         session.on_disconnect(cb1)
@@ -562,7 +563,7 @@ class TestDisconnectCallback:
     @pytest.mark.asyncio
     async def test_disconnect_callback_error_does_not_propagate(self) -> None:
         """Errors in disconnect callbacks don't crash the session."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
         bad_callback = AsyncMock(side_effect=RuntimeError("callback error"))
         good_callback = AsyncMock()
         session.on_disconnect(bad_callback)
@@ -577,7 +578,7 @@ class TestDisconnectCallback:
     @pytest.mark.asyncio
     async def test_disconnect_marks_session_closed(self) -> None:
         """_handle_disconnect marks the session as closed."""
-        session, _, _, _ = _make_session()
+        session, _, _, _, _ = _make_session()
 
         await session._handle_disconnect("network error")
 
@@ -595,7 +596,7 @@ class TestDispatchLoop:
     @pytest.mark.asyncio
     async def test_dispatch_routes_io_channel(self) -> None:
         """Dispatch loop routes I/O channel PDUs to _handle_io_channel_pdu."""
-        session, _, mock_mcs, mock_security = _make_session()
+        session, _, mock_mcs, mock_security, _ = _make_session()
 
         # Build a minimal Data PDU
         share_data_header = struct.pack("<IBBHBBH", 0x00010001, 0, 1, 0, 0x2F, 0, 0)
@@ -615,9 +616,10 @@ class TestDispatchLoop:
     @pytest.mark.asyncio
     async def test_dispatch_routes_static_channel(self) -> None:
         """Dispatch loop routes static VC PDUs to the channel handler."""
-        session, _, _, _ = _make_session(
+        session, _, _, _, mock_x224 = _make_session(
             channel_map={1004: "cliprdr", 1005: "rdpsnd"}
         )
+        mock_x224.recv_any = AsyncMock(side_effect=asyncio.CancelledError)
         await session.start()
         # Cancel the dispatch task immediately
         session._dispatch_task.cancel()
@@ -643,12 +645,12 @@ class TestDispatchLoop:
     @pytest.mark.asyncio
     async def test_dispatch_loop_detects_connection_error(self) -> None:
         """Dispatch loop invokes disconnect on connection error."""
-        session, _, mock_mcs, _ = _make_session()
+        session, _, mock_mcs, _, mock_x224 = _make_session()
         callback = AsyncMock()
         session.on_disconnect(callback)
 
-        # Make recv_pdu raise a connection error
-        mock_mcs.recv_pdu = AsyncMock(side_effect=ConnectionError("broken pipe"))
+        # Make recv_any raise a connection error
+        mock_x224.recv_any = AsyncMock(side_effect=ConnectionError("broken pipe"))
 
         await session.start()
         # Wait for the dispatch loop to process the error
@@ -660,10 +662,10 @@ class TestDispatchLoop:
     @pytest.mark.asyncio
     async def test_dispatch_loop_handles_cancellation(self) -> None:
         """Dispatch loop exits cleanly on task cancellation."""
-        session, _, mock_mcs, _ = _make_session()
+        session, _, mock_mcs, _, mock_x224 = _make_session()
 
-        # Make recv_pdu block forever
-        mock_mcs.recv_pdu = AsyncMock(side_effect=asyncio.CancelledError)
+        # Make recv_any block forever
+        mock_x224.recv_any = AsyncMock(side_effect=asyncio.CancelledError)
 
         await session.start()
         await asyncio.sleep(0.01)
@@ -684,10 +686,10 @@ class TestStart:
     @pytest.mark.asyncio
     async def test_start_initializes_channels(self) -> None:
         """start() initializes static virtual channels from MCS channel map."""
-        session, _, mock_mcs, _ = _make_session(
+        session, _, mock_mcs, _, mock_x224 = _make_session(
             channel_map={1004: "cliprdr", 1005: "rdpsnd"}
         )
-        mock_mcs.recv_pdu = AsyncMock(side_effect=asyncio.CancelledError)
+        mock_x224.recv_any = AsyncMock(side_effect=asyncio.CancelledError)
 
         await session.start()
         await asyncio.sleep(0.01)
@@ -702,8 +704,8 @@ class TestStart:
     @pytest.mark.asyncio
     async def test_start_creates_dispatch_task(self) -> None:
         """start() creates a background dispatch task."""
-        session, _, mock_mcs, _ = _make_session()
-        mock_mcs.recv_pdu = AsyncMock(side_effect=asyncio.CancelledError)
+        session, _, mock_mcs, _, mock_x224 = _make_session()
+        mock_x224.recv_any = AsyncMock(side_effect=asyncio.CancelledError)
 
         await session.start()
         await asyncio.sleep(0.01)
@@ -723,10 +725,10 @@ class TestFastPathDetection:
 
     def test_fast_path_detected_from_general_cap(self) -> None:
         """Fast-path is detected from GeneralCapabilitySet extra_flags."""
-        session, _, _, _ = _make_session(fast_path=True)
+        session, _, _, _, _ = _make_session(fast_path=True)
         assert session._fast_path_supported is True
 
     def test_no_fast_path_without_general_cap(self) -> None:
         """Fast-path is not detected without GeneralCapabilitySet."""
-        session, _, _, _ = _make_session(fast_path=False)
+        session, _, _, _, _ = _make_session(fast_path=False)
         assert session._fast_path_supported is False

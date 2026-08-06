@@ -473,3 +473,219 @@ class TestXorAndMaskDecoding:
         assert rgba[0:4] == bytes([0x00, 0x00, 0xFF, 0xFF])
         # Output row 1 = wire row 0 (bottom in display) = red BGR(00,00,FF) → RGB(FF,00,00)
         assert rgba[4:8] == bytes([0xFF, 0x00, 0x00, 0xFF])
+
+
+# ============================================================================
+# Raw-Bytes Convenience Method Tests (Tasks 11.1–11.4)
+# ============================================================================
+
+
+class TestSetColorPointer:
+    """Tests for PointerHandler.set_color_pointer(data: bytes)."""
+
+    def test_set_color_pointer_parses_and_caches(self) -> None:
+        """set_color_pointer parses raw bytes and stores the decoded pointer."""
+        handler = PointerHandler()
+        # Build a ColorPointerUpdate via serialize to get known raw bytes
+        update = ColorPointerUpdate(
+            cache_index=7,
+            hotspot_x=2,
+            hotspot_y=3,
+            width=2,
+            height=2,
+            and_mask_data=b"\x00\x00" * 2,
+            xor_mask_data=b"\xFF\x00\x00\x00\xFF\x00" * 2,  # 24bpp BGR
+        )
+        raw_data = update.serialize()
+
+        handler.set_color_pointer(raw_data)
+
+        assert 7 in handler.cache
+        pointer = handler.cache[7]
+        assert pointer.width == 2
+        assert pointer.height == 2
+        assert pointer.hotspot_x == 2
+        assert pointer.hotspot_y == 3
+        assert len(pointer.rgba_data) == 2 * 2 * 4
+        assert handler.active_pointer is pointer
+        assert handler.visible is True
+
+    def test_set_color_pointer_sets_active(self) -> None:
+        """set_color_pointer makes the parsed pointer active and visible."""
+        handler = PointerHandler()
+        handler.handle_system_pointer(SYSTEM_POINTER_NULL)
+        assert handler.visible is False
+
+        update = ColorPointerUpdate(
+            cache_index=0,
+            hotspot_x=0,
+            hotspot_y=0,
+            width=1,
+            height=1,
+            and_mask_data=b"\x00\x00",
+            xor_mask_data=b"\xFF\xFF\xFF\x00",  # 24bpp row padded to 4 bytes
+        )
+        handler.set_color_pointer(update.serialize())
+        assert handler.visible is True
+        assert handler.active_pointer is not None
+
+
+class TestSetCached:
+    """Tests for PointerHandler.set_cached(data: bytes)."""
+
+    def test_set_cached_retrieves_from_cache(self) -> None:
+        """set_cached parses the cache index and activates the cached pointer."""
+        handler = PointerHandler()
+        # Pre-populate cache
+        xor_mask = b"\xFF\x00\x00\xFF" * 4
+        and_mask = b"\x00\x00" * 2
+        new_update = NewPointerUpdate(
+            xor_bpp=32,
+            cache_index=5,
+            hotspot_x=1,
+            hotspot_y=1,
+            width=2,
+            height=2,
+            and_mask_data=and_mask,
+            xor_mask_data=xor_mask,
+        )
+        handler.handle_new_pointer(new_update)
+
+        # Switch away
+        handler.handle_system_pointer(SYSTEM_POINTER_DEFAULT)
+        assert handler.active_pointer != handler.cache[5]
+
+        # Use set_cached with raw bytes
+        cached_update = CachedPointerUpdate(cache_index=5)
+        handler.set_cached(cached_update.serialize())
+
+        assert handler.active_pointer == handler.cache[5]
+        assert handler.visible is True
+
+    def test_set_cached_raises_on_missing_index(self) -> None:
+        """set_cached raises KeyError when cache index doesn't exist."""
+        handler = PointerHandler()
+        cached_update = CachedPointerUpdate(cache_index=99)
+        with pytest.raises(KeyError, match="Pointer cache index 99 not found"):
+            handler.set_cached(cached_update.serialize())
+
+
+class TestSetNewPointer:
+    """Tests for PointerHandler.set_new_pointer(data: bytes)."""
+
+    def test_set_new_pointer_32bpp(self) -> None:
+        """set_new_pointer parses and caches a 32bpp pointer from raw bytes."""
+        handler = PointerHandler()
+        update = NewPointerUpdate(
+            xor_bpp=32,
+            cache_index=12,
+            hotspot_x=8,
+            hotspot_y=8,
+            width=2,
+            height=2,
+            and_mask_data=b"\x00\x00" * 2,
+            xor_mask_data=b"\x00\xFF\x00\xFF" * 4,  # green BGRA pixels
+        )
+        raw_data = update.serialize()
+
+        handler.set_new_pointer(raw_data)
+
+        assert 12 in handler.cache
+        pointer = handler.cache[12]
+        assert pointer.width == 2
+        assert pointer.height == 2
+        assert pointer.hotspot_x == 8
+        assert pointer.hotspot_y == 8
+        assert len(pointer.rgba_data) == 2 * 2 * 4
+        assert handler.active_pointer is pointer
+        assert handler.visible is True
+
+    def test_set_new_pointer_24bpp(self) -> None:
+        """set_new_pointer parses and caches a 24bpp pointer from raw bytes."""
+        handler = PointerHandler()
+        update = NewPointerUpdate(
+            xor_bpp=24,
+            cache_index=4,
+            hotspot_x=0,
+            hotspot_y=0,
+            width=2,
+            height=1,
+            and_mask_data=b"\x00\x00",
+            xor_mask_data=b"\xFF\x00\x00\x00\xFF\x00",  # blue, green pixels (BGR)
+        )
+        raw_data = update.serialize()
+
+        handler.set_new_pointer(raw_data)
+
+        assert 4 in handler.cache
+        pointer = handler.cache[4]
+        assert pointer.width == 2
+        assert pointer.height == 1
+        assert len(pointer.rgba_data) == 2 * 1 * 4
+
+
+class TestSetLargePointer:
+    """Tests for PointerHandler.set_large_pointer(data: bytes)."""
+
+    def test_set_large_pointer_parses_and_caches(self) -> None:
+        """set_large_pointer parses a large pointer from raw bytes and caches it."""
+        handler = PointerHandler()
+        width, height = 4, 4
+        update = LargePointerUpdate(
+            xor_bpp=32,
+            cache_index=1,
+            hotspot_x=2,
+            hotspot_y=2,
+            width=width,
+            height=height,
+            and_mask_data=b"\x00\x00" * height,
+            xor_mask_data=b"\xFF\x00\x00\xFF" * (width * height),
+        )
+        raw_data = update.serialize()
+
+        handler.set_large_pointer(raw_data)
+
+        assert 1 in handler.cache
+        pointer = handler.cache[1]
+        assert pointer.width == 4
+        assert pointer.height == 4
+        assert pointer.hotspot_x == 2
+        assert pointer.hotspot_y == 2
+        assert len(pointer.rgba_data) == 4 * 4 * 4
+        assert handler.active_pointer is pointer
+        assert handler.visible is True
+
+    def test_set_large_pointer_overwrites_cache(self) -> None:
+        """set_large_pointer overwrites an existing entry at the same cache index."""
+        handler = PointerHandler()
+        # First pointer at index 0
+        update1 = LargePointerUpdate(
+            xor_bpp=32,
+            cache_index=0,
+            hotspot_x=0,
+            hotspot_y=0,
+            width=2,
+            height=2,
+            and_mask_data=b"\x00\x00" * 2,
+            xor_mask_data=b"\xFF\x00\x00\xFF" * 4,
+        )
+        handler.set_large_pointer(update1.serialize())
+        first_pointer = handler.cache[0]
+
+        # Second pointer at same index
+        update2 = LargePointerUpdate(
+            xor_bpp=32,
+            cache_index=0,
+            hotspot_x=1,
+            hotspot_y=1,
+            width=2,
+            height=2,
+            and_mask_data=b"\x00\x00" * 2,
+            xor_mask_data=b"\x00\xFF\x00\xFF" * 4,
+        )
+        handler.set_large_pointer(update2.serialize())
+        second_pointer = handler.cache[0]
+
+        assert second_pointer is not first_pointer
+        assert second_pointer.hotspot_x == 1
+        assert second_pointer.hotspot_y == 1

@@ -51,6 +51,47 @@ class TestIsFastPath:
         assert is_fast_path(header) is True
 
 
+class TestActionFieldDetection:
+    """Verify action=0x00 for fast-path and action=0x03 for TPKT detection.
+
+    Per [MS-RDPBCGR] 2.2.9.1.2, the fpOutputHeader byte's bits 0-1 encode
+    the `action` field:
+    - action=0x00: FASTPATH_OUTPUT_ACTION_FASTPATH
+    - action=0x03: TPKT/slow-path (byte value 0x03 is also the TPKT magic byte)
+    """
+
+    def test_action_0x00_is_fast_path(self) -> None:
+        """A byte with action=0x00 (bits 0-1 = 0b00) is fast-path."""
+        assert is_fast_path(0x00) is True
+
+    def test_action_0x03_is_tpkt(self) -> None:
+        """A byte with action=0x03 (bits 0-1 = 0b11) is TPKT/slow-path."""
+        assert is_fast_path(0x03) is False
+
+    @pytest.mark.parametrize(
+        "byte_val,description",
+        [
+            (0x00, "action=0, reserved=0, flags=0"),
+            (0x04, "action=0, reserved=1 (bit 2 set), flags=0"),
+            (0x08, "action=0, reserved=2 (bit 3 set), flags=0"),
+            (0x10, "action=0, reserved=4 (bit 4 set), flags=0"),
+            (0x20, "action=0, reserved=8 (bit 5 set), flags=0"),
+            (0x3C, "action=0, reserved=0x0F (all reserved bits set), flags=0"),
+            (0x40, "action=0, reserved=0, flags=1 (SECURE_CHECKSUM)"),
+            (0x80, "action=0, reserved=0, flags=2 (ENCRYPTED)"),
+            (0xC0, "action=0, reserved=0, flags=3 (both security flags)"),
+            (0xFC, "action=0, all reserved+flags bits set"),
+        ],
+    )
+    def test_action_0x00_with_various_upper_bits_is_fast_path(
+        self, byte_val: int, description: str
+    ) -> None:
+        """Bytes with action=0x00 (bits 0-1 = 0) but different flags/reserved bits are still fast-path."""
+        # Confirm bits 0-1 are actually 0x00 (action = fast-path)
+        assert (byte_val & 0x03) == 0x00, f"Test setup error: {description}"
+        assert is_fast_path(byte_val) is True
+
+
 # ---------------------------------------------------------------------------
 # FastPathKeyboardEvent
 # ---------------------------------------------------------------------------
@@ -345,12 +386,12 @@ class TestFastPathOutputPdu:
         assert parsed.updates[1].data == original.updates[1].data
 
     def test_parse_with_flags(self) -> None:
-        """Parse output PDU with security flags set."""
-        # fpOutputHeader: action=0, flags=2 (encrypted) → (2 << 4) = 0x20
+        """Parse output PDU with security flags set in bits 6-7."""
+        # fpOutputHeader: action=0, reserved=0, flags=2 (encrypted) → (2 << 6) = 0x80
         update_data = b"\xFF"
         update_bytes = bytes([0x01]) + struct.pack("<H", 1) + update_data
         total_length = 1 + 1 + len(update_bytes)
-        raw = bytes([0x20, total_length]) + update_bytes
+        raw = bytes([0x80, total_length]) + update_bytes
 
         pdu = FastPathOutputPdu.parse(raw)
         assert pdu.flags == 0x02
@@ -370,6 +411,40 @@ class TestFastPathOutputPdu:
         raw = bytes([0x00, 0x03, 0x01])  # length=3, one byte of update
         with pytest.raises(PduParseError):
             FastPathOutputPdu.parse(raw)
+
+    @pytest.mark.parametrize("flag_value", [0x00, 0x01, 0x02, 0x03])
+    def test_round_trip_fp_output_header_flags(self, flag_value: int) -> None:
+        """Verify round-trip parse/serialize of fpOutputHeader flags (bits 6-7).
+
+        The fpOutputHeader byte layout per [MS-RDPBCGR] 2.2.9.1.2:
+        - action: bits 0-1 (LSB)
+        - reserved: bits 2-5
+        - flags: bits 6-7 (MSB)
+
+        Flags are extracted as (byte >> 6) & 0x03.
+        """
+        original = FastPathOutputPdu(
+            updates=[
+                FastPathOutputUpdate(
+                    update_code=FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_BITMAP,
+                    data=b"\xCA\xFE",
+                ),
+            ],
+            flags=flag_value,
+        )
+        serialized = original.serialize()
+
+        # Verify the fpOutputHeader byte encodes flags in bits 6-7
+        header_byte = serialized[0]
+        extracted_flags = (header_byte >> 6) & 0x03
+        assert extracted_flags == flag_value
+
+        # Parse back and verify flags round-trip correctly
+        parsed = FastPathOutputPdu.parse(serialized)
+        assert parsed.flags == flag_value
+        assert len(parsed.updates) == 1
+        assert parsed.updates[0].update_code == FastPathOutputUpdateCode.FASTPATH_UPDATETYPE_BITMAP
+        assert parsed.updates[0].data == b"\xCA\xFE"
 
 
 # ---------------------------------------------------------------------------
