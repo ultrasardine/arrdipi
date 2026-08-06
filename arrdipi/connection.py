@@ -26,7 +26,6 @@ from arrdipi.pdu.capabilities import (
     ClientCapabilitiesConfig,
     ConfirmActivePdu,
     DemandActivePdu,
-    _serialize_capability_set,
     build_client_capabilities,
 )
 from arrdipi.pdu.finalization import (
@@ -510,44 +509,29 @@ class ConnectionSequence:
                         demand_active = DemandActivePdu.parse(payload[6:])
                         break
 
-        # Build client capabilities — echo back ALL server caps with our overrides
+        # Build client capabilities — echo back ALL server caps verbatim.
+        # Per FreeRDP's approach, the simplest correct behavior is to reflect
+        # the server's capability set back. This ensures all mandatory caps are
+        # present with the exact format the server expects.
         caps_config = ClientCapabilitiesConfig(
             width=self._config.width,
             height=self._config.height,
             color_depth=self._config.color_depth,
         )
 
-        # Build our custom capabilities for the types we care about
-        client_caps_list = build_client_capabilities(
-            demand_active.capability_sets, caps_config,
-            raw_server_caps=demand_active.raw_capability_bytes,
-        )
-
-        # Strategy: echo back ALL raw server caps (the server requires all
-        # its caps to be acknowledged). Override specific ones with our values.
-        raw_caps_combined = bytearray()
-        our_cap_types = {int(t) for t, _ in client_caps_list}
+        # Use raw server capabilities as the Confirm Active response
+        raw_caps_data = b""
         num_caps = 0
+        if demand_active.raw_capability_bytes:
+            raw_caps_data = b"".join(demand_active.raw_capability_bytes)
+            num_caps = len(demand_active.raw_capability_bytes)
 
-        # First add our custom capabilities
-        for cap_type, cap in client_caps_list:
-            raw_caps_combined.extend(_serialize_capability_set(cap_type, cap))
-            num_caps += 1
-
-        # Then add server caps we DON'T override (pass-through)
-        for raw_cap in demand_active.raw_capability_bytes:
-            if len(raw_cap) >= 4:
-                cap_type_raw = int.from_bytes(raw_cap[0:2], "little")
-                if cap_type_raw not in our_cap_types:
-                    raw_caps_combined.extend(raw_cap)
-                    num_caps += 1
-
-        # Build Confirm Active PDU with raw caps
+        # Build Confirm Active PDU with raw caps echo
         confirm_active = ConfirmActivePdu(
             share_id=demand_active.share_id,
             originator_id=0x03EA,
             source_descriptor=b"MSTSC\x00",
-            raw_caps_override=bytes(raw_caps_combined),
+            raw_caps_override=raw_caps_data,
             num_caps_override=num_caps,
         )
 

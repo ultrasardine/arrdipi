@@ -33,7 +33,7 @@ from arrdipi.pdu.info import ClientInfoPdu, ExtendedInfoPacket, InfoFlags, Timez
 from arrdipi.pdu.types import CompressionType, PerformanceFlags
 
 HOST = "localhost"
-PORT = 13390
+PORT = 13389
 
 CLIENT_SERVER_HASH_MAGIC = b"CredSSP Client-To-Server Binding Hash\0"
 SEC_INFO_PKT = 0x0040
@@ -287,33 +287,22 @@ async def main():
         caps_config = ClientCapabilitiesConfig(width=1920, height=1080, color_depth=32)
         client_caps = build_client_capabilities(demand.capability_sets, caps_config)
         
-        # Build raw caps: our overrides + pass-through of server caps we don't override
+        # Build raw caps: echo back the server's EXACT capabilities unmodified
+        # This is the simplest test to see if the structure is correct
         from arrdipi.pdu.capabilities import _serialize_capability_set, _extract_raw_capability_sets
         from arrdipi.pdu.types import CapabilitySetType
         
         # Extract raw server caps from the demand active body
         raw_body = demand_payload[6:]  # after ShareControl
-        d_off = 4 + 2 + 2  # shareId + srcDescLen + combCapsLen
         src_len = struct.unpack_from('<H', raw_body, 4)[0]
         comb_len = struct.unpack_from('<H', raw_body, 6)[0]
-        d_off += src_len + 4  # skip srcDesc + numCaps + pad
+        d_off = 4 + 2 + 2 + src_len + 4  # shareId+srcLen+combLen+srcDesc+numCaps+pad
         raw_caps_data = raw_body[d_off:d_off + comb_len - 4]
         raw_num = struct.unpack_from('<H', raw_body, 4 + 2 + 2 + src_len)[0]
-        raw_server_caps = _extract_raw_capability_sets(raw_caps_data, raw_num)
         
-        # Combine: our custom caps + pass-through of server caps we don't override
-        our_cap_types = {int(t) for t, _ in client_caps}
-        raw_caps_combined = bytearray()
-        num_caps = 0
-        for cap_type, cap in client_caps:
-            raw_caps_combined.extend(_serialize_capability_set(cap_type, cap))
-            num_caps += 1
-        for raw_cap in raw_server_caps:
-            if len(raw_cap) >= 4:
-                cap_type_raw = int.from_bytes(raw_cap[0:2], "little")
-                if cap_type_raw not in our_cap_types:
-                    raw_caps_combined.extend(raw_cap)
-                    num_caps += 1
+        # Just echo ALL server caps back verbatim
+        raw_caps_combined = raw_caps_data
+        num_caps = raw_num
 
         confirm = ConfirmActivePdu(
             share_id=demand.share_id, originator_id=0x03EA,
