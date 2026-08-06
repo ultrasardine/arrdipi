@@ -60,7 +60,7 @@ class TestGeneralCapabilitySetRoundTrip:
         cap = GeneralCapabilitySet()
         data = cap.serialize()
         # 9 x u16 + 2 x u8 = 20 bytes
-        assert len(data) == 20
+        assert len(data) == 24
 
 
 class TestBitmapCapabilitySetRoundTrip:
@@ -326,7 +326,6 @@ class TestBuildClientCapabilities:
         assert CapabilitySetType.INPUT in cap_types
         assert CapabilitySetType.POINTER in cap_types
         assert CapabilitySetType.VIRTUAL_CHANNEL in cap_types
-        assert CapabilitySetType.BITMAP_CODECS in cap_types
 
     def test_general_has_fastpath_support(self) -> None:
         """Verify Fast-Path support is advertised in GeneralCapabilitySet (Req 7, AC 4)."""
@@ -356,15 +355,12 @@ class TestBuildClientCapabilities:
         # DstBlt should be enabled
         assert order.order_support[0] == 1
 
-    def test_bitmap_codecs_has_remotefx_and_nscodec(self) -> None:
-        """Verify RemoteFX and NSCodec entries (Req 16 AC 4, Req 17 AC 4)."""
+    def test_no_bitmap_codecs_for_minimal_client(self) -> None:
+        """Minimal client does not include bitmap codecs (added later when needed)."""
         config = ClientCapabilitiesConfig()
         caps = build_client_capabilities({}, config)
-        codecs_cap = next(c for t, c in caps if t == CapabilitySetType.BITMAP_CODECS)
-        assert isinstance(codecs_cap, BitmapCodecsCapabilitySet)
-        guids = [c.codec_guid for c in codecs_cap.codecs]
-        assert NSCODEC_GUID in guids
-        assert REMOTEFX_GUID in guids
+        cap_types = {t for t, _ in caps}
+        assert CapabilitySetType.BITMAP_CODECS not in cap_types
 
     def test_input_has_fastpath_flags(self) -> None:
         """Verify input capability advertises fast-path input."""

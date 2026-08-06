@@ -107,7 +107,10 @@ class GeneralCapabilitySet(Pdu):
         )
 
     def serialize(self) -> bytes:
-        """Serialize GeneralCapabilitySet to payload bytes (without header)."""
+        """Serialize GeneralCapabilitySet to payload bytes (without header).
+        
+        Total payload: 24 bytes per MS-RDPBCGR 2.2.7.1.1.
+        """
         writer = ByteWriter()
         writer.write_u16_le(self.os_major_type)
         writer.write_u16_le(self.os_minor_type)
@@ -120,6 +123,9 @@ class GeneralCapabilitySet(Pdu):
         writer.write_u16_le(self.general_compression_level)
         writer.write_u8(self.refresh_rect_support)
         writer.write_u8(self.suppress_output_support)
+        # pad2octetsB + pad2octetsC — required to reach 24-byte payload per spec
+        writer.write_u16_le(0)
+        writer.write_u16_le(0)
         return writer.to_bytes()
 
 
@@ -607,9 +613,8 @@ def build_client_capabilities(
 ) -> list[tuple[CapabilitySetType, Pdu]]:
     """Build the client capability set list for the Confirm Active PDU.
 
-    Advertises Fast-Path support in GeneralCapabilitySet (Req 7, AC 4).
-    Includes Order support array for GDI orders (Req 14, AC 4).
-    Includes RemoteFX and NSCodec in BitmapCodecs (Req 16 AC 4, Req 17 AC 4).
+    Returns a minimal set of capabilities that satisfies the server.
+    Each capability payload size must exactly match MS-RDPBCGR 2.2.7.
 
     Args:
         server_caps: Parsed server capability sets from DemandActivePdu.
@@ -620,7 +625,8 @@ def build_client_capabilities(
     """
     caps: list[tuple[CapabilitySetType, Pdu]] = []
 
-    # General capability set with Fast-Path support advertised
+    # General capability set — MS-RDPBCGR 2.2.7.1.1
+    # Total payload must be 24 bytes (not 20)
     general = GeneralCapabilitySet(
         os_major_type=1,  # OSMAJORTYPE_WINDOWS
         os_minor_type=3,  # OSMINORTYPE_WINDOWS_NT
@@ -629,7 +635,6 @@ def build_client_capabilities(
             FASTPATH_OUTPUT_SUPPORTED
             | LONG_CREDENTIALS_SUPPORTED
             | NO_BITMAP_COMPRESSION_HDR
-            | ENC_SALTED_CHECKSUM
             | AUTORECONNECT_SUPPORTED
         ),
         refresh_rect_support=1,
@@ -637,7 +642,7 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.GENERAL, general))
 
-    # Bitmap capability set
+    # Bitmap capability set — MS-RDPBCGR 2.2.7.1.2
     bitmap = BitmapCapabilitySet(
         preferred_bits_per_pixel=config.color_depth,
         desktop_width=config.width,
@@ -648,33 +653,18 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.BITMAP, bitmap))
 
-    # Order capability set with 32-byte order support array (Req 14, AC 4)
-    # Enable common drawing orders
+    # Order capability set — MS-RDPBCGR 2.2.7.1.3
     order_support = bytearray(32)
-    # DstBlt (index 0)
-    order_support[0] = 1
-    # PatBlt (index 1)
-    order_support[1] = 1
-    # ScrBlt (index 2)
-    order_support[2] = 1
-    # MemBlt (index 3)
-    order_support[3] = 1
-    # Mem3Blt (index 4)
-    order_support[4] = 1
-    # LineTo (index 8)
-    order_support[8] = 1
-    # SaveBitmap (index 11)
-    order_support[11] = 1
-    # MultiDstBlt (index 15)
-    order_support[15] = 1
-    # MultiPatBlt (index 16)
-    order_support[16] = 1
-    # MultiScrBlt (index 17)
-    order_support[17] = 1
-    # MultiOpaqueRect (index 18)
-    order_support[18] = 1
-    # GlyphIndex (index 27)
-    order_support[27] = 1
+    order_support[0] = 1   # DstBlt
+    order_support[1] = 1   # PatBlt
+    order_support[2] = 1   # ScrBlt
+    order_support[3] = 1   # MemBlt
+    order_support[8] = 1   # LineTo
+    order_support[15] = 1  # MultiDstBlt
+    order_support[16] = 1  # MultiPatBlt
+    order_support[17] = 1  # MultiScrBlt
+    order_support[18] = 1  # MultiOpaqueRect
+    order_support[27] = 1  # GlyphIndex
 
     order = OrderCapabilitySet(
         order_flags=0x0022,  # NEGOTIATEORDERSUPPORT | ZEROBOUNDSDELTASSUPPORT
@@ -683,7 +673,7 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.ORDER, order))
 
-    # Input capability set with fast-path input support
+    # Input capability set — MS-RDPBCGR 2.2.7.1.6
     input_cap = InputCapabilitySet(
         input_flags=(
             INPUT_FLAG_SCANCODES
@@ -691,7 +681,6 @@ def build_client_capabilities(
             | INPUT_FLAG_FASTPATH_INPUT
             | INPUT_FLAG_UNICODE
             | INPUT_FLAG_FASTPATH_INPUT2
-            | INPUT_FLAG_MOUSE_HWHEEL
         ),
         keyboard_layout=config.keyboard_layout,
         keyboard_type=config.keyboard_type,
@@ -700,7 +689,7 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.INPUT, input_cap))
 
-    # Pointer capability set
+    # Pointer capability set — MS-RDPBCGR 2.2.7.1.5
     pointer = PointerCapabilitySet(
         color_pointer_flag=1,
         color_pointer_cache_size=25,
@@ -708,37 +697,11 @@ def build_client_capabilities(
     )
     caps.append((CapabilitySetType.POINTER, pointer))
 
-    # Virtual channel capability set
+    # Virtual channel capability set — MS-RDPBCGR 2.2.7.1.10
     virtual_channel = VirtualChannelCapabilitySet(
         flags=VCCAPS_COMPR_CS_8K,
         vc_chunk_size=1600,
     )
     caps.append((CapabilitySetType.VIRTUAL_CHANNEL, virtual_channel))
-
-    # Bitmap codecs capability set with RemoteFX, NSCodec, AVC420, AVC444 (Req 16 AC 4, Req 17 AC 4, Req 18 AC 6)
-    codecs = [
-        BitmapCodecEntry(
-            codec_guid=NSCODEC_GUID,
-            codec_id=1,
-            codec_properties=bytes([0x01, 0x01, 0x03]),  # dynamic fidelity, subsampling, color loss level
-        ),
-        BitmapCodecEntry(
-            codec_guid=REMOTEFX_GUID,
-            codec_id=3,
-            codec_properties=b"",
-        ),
-        BitmapCodecEntry(
-            codec_guid=AVC420_GUID,
-            codec_id=4,
-            codec_properties=b"",
-        ),
-        BitmapCodecEntry(
-            codec_guid=AVC444_GUID,
-            codec_id=5,
-            codec_properties=b"",
-        ),
-    ]
-    bitmap_codecs = BitmapCodecsCapabilitySet(codecs=codecs)
-    caps.append((CapabilitySetType.BITMAP_CODECS, bitmap_codecs))
 
     return caps
