@@ -56,5 +56,5 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Check import
+      - name: Check import and version
         run: uv run python -c "import arrdipi; print(f'arrdipi {arrdipi.__version__}')"

@@ -1,0 +1,15 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "arrdipi",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "arrdipi/__init__.py",
+          "glob": "__version__ = \"${version}\""
+        }
+      ]
+    }
+  }
+}
