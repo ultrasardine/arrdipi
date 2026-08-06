@@ -691,14 +691,17 @@ class ConnectionSequence:
 
         # Build ShareData header
         # shareId(4) + pad1(1) + streamId(1) + uncompressedLength(2) +
-        # pduType2(1) + compressedType(1) + compressedLength(2)
+        # pduType2(1) + compressedType(1) + compressedLength(2) = 12 bytes
         share_id = getattr(self, '_share_id', 0)
+        # Per MS-RDPBCGR 2.2.8.1.1.1.2: uncompressedLength is the size from
+        # the start of shareDataHeader to end of packet = 12 + len(payload)
+        uncompressed_length = 12 + len(payload)
         share_data_header = struct.pack(
             "<IBBHBBH",
             share_id,  # shareId from Demand Active
             0,  # pad1
             1,  # streamId (STREAM_LOW)
-            len(payload),  # uncompressedLength
+            uncompressed_length,  # uncompressedLength (includes this header)
             pdu_type2,  # pduType2
             0,  # compressedType
             0,  # compressedLength

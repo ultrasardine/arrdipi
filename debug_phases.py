@@ -33,7 +33,7 @@ from arrdipi.pdu.info import ClientInfoPdu, ExtendedInfoPacket, InfoFlags, Timez
 from arrdipi.pdu.types import CompressionType, PerformanceFlags
 
 HOST = "localhost"
-PORT = 13390
+PORT = 13389
 
 CLIENT_SERVER_HASH_MAGIC = b"CredSSP Client-To-Server Binding Hash\0"
 SEC_INFO_PKT = 0x0040
@@ -253,14 +253,123 @@ async def main():
         demand_raw = await asyncio.wait_for(x224.recv_pdu(), timeout=10)
         channel_id, demand_payload = _parse_send_data_indication(demand_raw)
         print(f"✓ Phase 9: Demand Active ({len(demand_payload)} bytes on channel {channel_id})")
-        print(f"  First 20 bytes: {demand_payload[:20].hex()}")
+
+        # Parse Share Control Header (6 bytes)
+        total_len = struct.unpack_from("<H", demand_payload, 0)[0]
+        pdu_type = struct.unpack_from("<H", demand_payload, 2)[0]
+        pdu_source = struct.unpack_from("<H", demand_payload, 4)[0]
+        print(f"  ShareControl: totalLen={total_len}, pduType=0x{pdu_type:04X}, source={pdu_source}")
+        
+        # Parse Demand Active body (after 6-byte ShareControl header)
+        from arrdipi.pdu.capabilities import DemandActivePdu, ConfirmActivePdu, build_client_capabilities, ClientCapabilitiesConfig
+        demand = DemandActivePdu.parse(demand_payload[6:])
+        print(f"  shareId=0x{demand.share_id:08X}, caps={len(demand.capability_sets)}")
+
+        # Build and send Confirm Active
+        caps_config = ClientCapabilitiesConfig(width=1920, height=1080, color_depth=32)
+        client_caps = build_client_capabilities(demand.capability_sets, caps_config)
+        confirm = ConfirmActivePdu(
+            share_id=demand.share_id, originator_id=0x03EA,
+            source_descriptor=b"MSTSC\x00", capability_sets=dict(client_caps),
+        )
+        confirm_data = confirm.serialize()
+        
+        # Wrap in ShareControl header
+        sc_total = len(confirm_data) + 6
+        share_control = struct.pack("<HHH", sc_total, 0x0013, user_channel_id) + confirm_data
+        
+        # Send via MCS
+        mcs_pdu = _build_send_data_request(user_channel_id, io_channel, share_control)
+        await x224.send_pdu(mcs_pdu)
+        print(f"  ✓ Sent Confirm Active ({len(share_control)} bytes)")
+
+        # Phase 10: Send finalization PDUs
+        print(f"\n--- Phase 10: Connection Finalization ---")
+        share_id = demand.share_id
+        
+        def build_data_pdu(pdu_type2: int, payload: bytes) -> bytes:
+            """Wrap payload in ShareData + ShareControl headers."""
+            # ShareData header (12 bytes)
+            uncompressed_len = 12 + len(payload)
+            share_data = struct.pack("<IBBHBBH",
+                share_id, 0, 1, uncompressed_len, pdu_type2, 0, 0)
+            inner = share_data + payload
+            # ShareControl header (6 bytes)
+            total = len(inner) + 6
+            share_ctrl = struct.pack("<HHH", total, 0x0017, user_channel_id)
+            return share_ctrl + inner
+
+        # Synchronize
+        sync_payload = struct.pack("<HH", 1, user_channel_id)
+        sync_pdu = build_data_pdu(0x1F, sync_payload)
+        mcs_pdu = _build_send_data_request(user_channel_id, io_channel, sync_pdu)
+        await x224.send_pdu(mcs_pdu)
+        print(f"  ✓ Sent Synchronize")
+
+        # Control Cooperate
+        ctrl_coop = struct.pack("<HHI", 4, 0, 0)  # COOPERATE=4
+        ctrl_pdu = build_data_pdu(0x14, ctrl_coop)
+        mcs_pdu = _build_send_data_request(user_channel_id, io_channel, ctrl_pdu)
+        await x224.send_pdu(mcs_pdu)
+        print(f"  ✓ Sent Control Cooperate")
+
+        # Control Request Control
+        ctrl_req = struct.pack("<HHI", 1, 0, 0)  # REQUEST_CONTROL=1
+        ctrl_pdu = build_data_pdu(0x14, ctrl_req)
+        mcs_pdu = _build_send_data_request(user_channel_id, io_channel, ctrl_pdu)
+        await x224.send_pdu(mcs_pdu)
+        print(f"  ✓ Sent Control Request")
+
+        # Font List
+        font_list = struct.pack("<HHHH", 0, 0, 3, 0x0032)
+        font_pdu = build_data_pdu(0x27, font_list)
+        mcs_pdu = _build_send_data_request(user_channel_id, io_channel, font_pdu)
+        await x224.send_pdu(mcs_pdu)
+        print(f"  ✓ Sent Font List")
+
+        # Wait for server finalization responses
+        print(f"\n  Waiting for server finalization PDUs...")
+        for i in range(4):
+            try:
+                resp_raw = await asyncio.wait_for(x224.recv_pdu(), timeout=10)
+                ch, resp_payload = _parse_send_data_indication(resp_raw)
+                # Parse ShareControl
+                sc_type = struct.unpack_from("<H", resp_payload, 2)[0] & 0x000F
+                if sc_type == 7:  # DATA PDU
+                    pdu_type2 = resp_payload[6 + 4 + 1 + 1 + 2]  # = offset 14
+                    print(f"  ✓ Server PDU #{i+1}: pduType2=0x{pdu_type2:02X} ({len(resp_payload)} bytes)")
+                    # If SET_ERROR_INFO (0x2F), decode the error code
+                    if pdu_type2 == 0x2F:
+                        # Error code is at offset 6(SC) + 12(SD) = 18
+                        if len(resp_payload) >= 22:
+                            error_code = struct.unpack_from("<I", resp_payload, 18)[0]
+                            print(f"    Error Info code: 0x{error_code:08X}")
+                            if error_code == 0:
+                                print(f"    → ERRINFO_NONE (no error, session ready)")
+                            else:
+                                print(f"    → Server error! See MS-RDPBCGR 2.2.5.1.1")
+                else:
+                    print(f"  ✓ Server PDU #{i+1}: scType={sc_type} ({len(resp_payload)} bytes)")
+            except asyncio.IncompleteReadError as e:
+                print(f"  ✗ Connection closed at PDU #{i+1}: {e.partial!r}")
+                break
+            except asyncio.TimeoutError:
+                print(f"  ✗ Timeout at PDU #{i+1}")
+                break
+            except Exception as e:
+                print(f"  ✗ Error at PDU #{i+1}: {type(e).__name__}: {e}")
+                break
+        
+        print(f"\n  *** CONNECTION SEQUENCE COMPLETE! ***")
+
     except asyncio.IncompleteReadError as e:
         print(f"  ✗ Connection closed waiting for Demand Active: {e.partial!r}")
-        print(f"    This means the server rejected something in Phase 5 or 7")
     except asyncio.TimeoutError:
         print(f"  ✗ Timeout waiting for Demand Active")
     except Exception as e:
         print(f"  ✗ Error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
 
     tcp.writer.close()
 
