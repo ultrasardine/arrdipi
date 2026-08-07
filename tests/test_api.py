@@ -37,8 +37,10 @@ class TestPackageImport:
     """Test that import arrdipi works and exposes the documented API."""
 
     def test_import_arrdipi(self) -> None:
-        """Verify import arrdipi succeeds and has version."""
-        assert arrdipi.__version__ == "0.1.0"
+        """Verify import arrdipi succeeds and has a valid semver version."""
+        import re
+
+        assert re.match(r"^\d+\.\d+\.\d+", arrdipi.__version__)
 
     def test_connect_function_exported(self) -> None:
         """Verify connect() is accessible from the package."""
