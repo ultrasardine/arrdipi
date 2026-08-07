@@ -64,6 +64,7 @@ pip install git+https://github.com/ultrasardine/arrdipi.git
 | `pyspnego` | NLA/CredSSP SPNEGO/NTLM/Kerberos |
 | `av` (PyAV) | H.264 frame decoding via FFmpeg |
 | `pygame` | CLI graphical desktop window |
+| `pyperclip` | Cross-platform OS clipboard integration for CLI sync |
 | `sounddevice` | Audio playback and capture |
 
 ## Quick Start
@@ -138,6 +139,9 @@ arrdipi connect --host server.local --user admin --security nla --width 2560 --h
 
 # Force GPU-backed presentation (falls back automatically if unavailable)
 arrdipi connect --host server.local --user admin --render-backend gpu
+
+# Enable bidirectional local/remote clipboard sync
+arrdipi connect --host server.local --user admin --clipboard-sync
 
 # Trusted self-signed cert (disable verification)
 arrdipi connect --host localhost --user Administrator --security auto --no-verify-cert
@@ -313,6 +317,7 @@ except arrdipi.ArrdipiError as e:
 | `--width` | `1920` | Desktop width in pixels |
 | `--height` | `1080` | Desktop height in pixels |
 | `--render-backend` | `auto` | Display backend: `auto`, `surface`, or `gpu` |
+| `--clipboard-sync` | `false` | Enable bidirectional local OS clipboard text sync |
 | `--drive` | — | Drive redirection: `NAME:PATH` or `NAME:PATH:ro` (repeatable) |
 
 ### Environment Variables

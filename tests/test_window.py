@@ -23,6 +23,8 @@ def mock_session():
     session.send_mouse_scroll = AsyncMock()
     session.on_graphics_update = MagicMock()
     session.on_disconnect = MagicMock()
+    session.on_clipboard_changed = MagicMock()
+    session.clipboard = None
 
     # Surface mock
     surface = MagicMock()
@@ -132,6 +134,54 @@ class TestDesktopWindowRun:
                 window._on_graphics_update
             )
 
+    @pytest.mark.asyncio
+    async def test_run_enables_clipboard_sync_when_available(self, mock_session) -> None:
+        """run() starts clipboard sync when enabled and cliprdr is available."""
+        with (
+            patch("arrdipi.cli.window.pygame") as mock_pygame,
+            patch("arrdipi.cli.window.importlib.import_module") as mock_import_module,
+        ):
+            mock_pygame.QUIT = 256
+            mock_pygame.KEYDOWN = 768
+            mock_pygame.KEYUP = 769
+            mock_pygame.MOUSEMOTION = 1024
+            mock_pygame.MOUSEBUTTONDOWN = 1025
+            mock_pygame.MOUSEBUTTONUP = 1026
+            mock_pygame.MOUSEWHEEL = 1027
+
+            quit_event = MagicMock()
+            quit_event.type = mock_pygame.QUIT
+            mock_pygame.event.get.return_value = [quit_event]
+
+            mock_pyperclip = MagicMock()
+            mock_pyperclip.paste.return_value = ""
+
+            def _import_module(name: str):
+                if name == "pyperclip":
+                    return mock_pyperclip
+                raise ImportError
+
+            mock_import_module.side_effect = _import_module
+
+            clipboard = MagicMock()
+            clipboard.set_clipboard_text = AsyncMock()
+            clipboard.get_server_clipboard_text = AsyncMock(return_value="")
+            mock_session.clipboard = clipboard
+
+            from arrdipi.cli.window import DesktopWindow
+
+            window = DesktopWindow(
+                mock_session,
+                width=1920,
+                height=1080,
+                clipboard_sync=True,
+            )
+            await window.run()
+
+            mock_session.on_clipboard_changed.assert_called_once_with(
+                window._on_clipboard_changed
+            )
+
 
 class TestProcessPygameEvents:
     """Tests for _process_pygame_events() — event mapping correctness."""
@@ -150,7 +200,7 @@ class TestProcessPygameEvents:
 
             event = MagicMock()
             event.type = mock_pygame.KEYDOWN
-            event.scancode = 30  # 'A' key scancode
+            event.scancode = 30  # SDL '1' key → PS/2 0x02
             mock_pygame.event.get.return_value = [event]
 
             from arrdipi.cli.window import DesktopWindow
@@ -159,7 +209,7 @@ class TestProcessPygameEvents:
             window._running = True
             await window._process_pygame_events()
 
-            mock_session.send_key.assert_called_once_with(30, is_released=False)
+            mock_session.send_key.assert_called_once_with(0x02, is_released=False, is_extended=False)
 
     @pytest.mark.asyncio
     async def test_keyup_sends_key_released(self, mock_session) -> None:
@@ -184,7 +234,7 @@ class TestProcessPygameEvents:
             window._running = True
             await window._process_pygame_events()
 
-            mock_session.send_key.assert_called_once_with(30, is_released=True)
+            mock_session.send_key.assert_called_once_with(0x02, is_released=True, is_extended=False)
 
     @pytest.mark.asyncio
     async def test_mousemotion_sends_mouse_move(self, mock_session) -> None:
@@ -345,7 +395,7 @@ class TestProcessPygameEvents:
             window._running = True
             await window._process_pygame_events()
 
-            mock_session.send_key.assert_called_once_with(42, is_released=False)
+            mock_session.send_key.assert_called_once_with(0x0E, is_released=False, is_extended=False)
             mock_session.send_mouse_move.assert_called_once_with(10, 20)
 
 

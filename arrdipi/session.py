@@ -15,6 +15,10 @@ import struct
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from arrdipi.channels.audio_input import AudioInputChannel
+from arrdipi.channels.audio_output import AudioOutputChannel
+from arrdipi.channels.clipboard import CLIPRDR_FORMAT_LIST, ClipboardChannel
+from arrdipi.channels.dynamic import DrdynvcHandler
 from arrdipi.channels.static import StaticVirtualChannel
 from arrdipi.codec.mppc import MppcDecompressor
 from arrdipi.codec.rdp6_bitmap import Rdp6BitmapCodec
@@ -324,12 +328,71 @@ class Session:
 
     def _init_channels(self) -> None:
         """Initialize static virtual channels from the MCS channel map."""
+        logger.info("_init_channels: channel_map=%s", self._mcs.channel_map)
         for channel_id, channel_name in self._mcs.channel_map.items():
             svc = StaticVirtualChannel(
                 channel_name=channel_name,
                 channel_id=channel_id,
             )
+            if channel_name == "cliprdr":
+                async def _cliprdr_send(data: bytes, svc: StaticVirtualChannel = svc) -> None:
+                    logger.debug("CLIPRDR send: len=%d hex=%s", len(data), data[:16].hex())
+                    await svc.send(self._mcs, data)
+                clipboard = ClipboardChannel(send_fn=_cliprdr_send)
+                svc.register_handler(self._make_clipboard_handler(clipboard))
+                self._clipboard = clipboard
+            elif channel_name == "rdpsnd":
+                audio_output = AudioOutputChannel(
+                    send_fn=lambda data, svc=svc: svc.send(self._mcs, data)
+                )
+                svc.register_handler(audio_output.handle_message)
+                self._audio_output = audio_output
+            elif channel_name == "rdpdr":
+                from arrdipi.channels.drive import DriveChannel
+                drive = DriveChannel(
+                    send_fn=lambda data, svc=svc: svc.send(self._mcs, data),
+                    drives=getattr(self._config, "drive_paths", []),
+                )
+                svc.register_handler(drive.handle_message)
+                self._drive = drive
+            elif channel_name == "drdynvc":
+                drdynvc = DrdynvcHandler(
+                    send_fn=lambda data, svc=svc: svc.send(self._mcs, data)
+                )
+
+                def _make_audin_send(dvc: DrdynvcHandler, static_svc: StaticVirtualChannel) -> Callable[[bytes], Awaitable[None]]:
+                    async def _send(data: bytes) -> None:
+                        from arrdipi.channels.dynamic import DynvcData
+                        for ch in dvc.channels.values():
+                            if ch.channel_name == "AUDIO_INPUT":
+                                pdu = DynvcData(channel_id=ch.channel_id, data=data)
+                                await static_svc.send(self._mcs, pdu.serialize())
+                                return
+                    return _send
+
+                audio_input = AudioInputChannel(send_fn=_make_audin_send(drdynvc, svc))
+                drdynvc.register_channel_factory("AUDIO_INPUT", audio_input.create_handler)
+                self._audio_input = audio_input
+                svc.register_handler(drdynvc.handle_message)
             self._static_channels[channel_id] = svc
+
+    def _make_clipboard_handler(
+        self, clipboard: ClipboardChannel
+    ) -> Callable[[bytes], Awaitable[None]]:
+        """Create static-channel handler for CLIPRDR messages."""
+
+        async def _handle_clipboard_message(data: bytes) -> None:
+            msg_type = struct.unpack_from("<H", data, 0)[0] if len(data) >= 2 else None
+            await clipboard.handle_message(data)
+
+            if msg_type == CLIPRDR_FORMAT_LIST:
+                for callback in self._on_clipboard_changed_callbacks:
+                    try:
+                        await callback(clipboard.server_formats)
+                    except Exception:
+                        logger.exception("Clipboard callback failed")
+
+        return _handle_clipboard_message
 
     async def disconnect(self) -> None:
         """Send Shutdown Request PDU and close cleanly.
@@ -877,9 +940,11 @@ class Session:
         if channel_id == io_channel_id:
             await self._handle_io_channel_pdu(data)
         elif channel_id in self._static_channels:
+            logger.debug("_route_pdu: routing channel_id=%d to static channel", channel_id)
             await self._handle_static_channel_pdu(channel_id, data)
         else:
-            logger.debug("Received PDU on unknown channel %d", channel_id)
+            logger.debug("_route_pdu: unknown channel_id=%d (io=%d, known=%s)",
+                         channel_id, io_channel_id, list(self._static_channels.keys()))
 
     async def _handle_io_channel_pdu(self, data: bytes) -> None:
         """Handle a PDU received on the I/O channel.
@@ -976,16 +1041,21 @@ class Session:
         to the channel's reassembly handler.
         """
         if len(data) < 8:
+            logger.debug("_handle_static_channel_pdu: channel=%d data too short (%d)", channel_id, len(data))
             return
 
-        # Channel PDU header: totalLength(u32 LE) + flags(u32 LE)
         _total_length = struct.unpack_from("<I", data, 0)[0]
         flags = struct.unpack_from("<I", data, 4)[0]
         chunk = data[8:]
 
+        logger.debug("_handle_static_channel_pdu: channel=%d total_len=%d flags=0x%08X chunk_len=%d hex=%s",
+                     channel_id, _total_length, flags, len(chunk), chunk[:16].hex())
+
         svc = self._static_channels.get(channel_id)
         if svc is not None:
             await svc.on_data_received(chunk, flags)
+        else:
+            logger.debug("_handle_static_channel_pdu: no SVC for channel_id=%d", channel_id)
 
     # --- Deactivate/Reactivate (Req 30, AC 3) ---
 

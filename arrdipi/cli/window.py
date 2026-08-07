@@ -9,14 +9,25 @@ forwarding keyboard/mouse input events to the RDP session.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import logging
+import subprocess
+import sys
+import tempfile
 from collections.abc import Awaitable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import pygame
 
 from arrdipi.graphics.surface import Rect
+from arrdipi.channels.clipboard import (
+    CF_UNICODETEXT,
+    FILE_CONTENTS,
+    FILE_GROUP_DESCRIPTOR,
+    FILE_GROUP_DESCRIPTOR_W,
+)
 
 if TYPE_CHECKING:
     from arrdipi.session import Session
@@ -24,6 +35,86 @@ if TYPE_CHECKING:
 from arrdipi.pdu.input_pdu import PointerFlags
 
 logger = logging.getLogger(__name__)
+
+# SDL scancode (USB HID page 0x07) → (PS/2 Set 1 make code, is_extended)
+# SDL scancodes come from event.scancode; RDP expects PS/2 Set 1 scan codes.
+_SDL_TO_PS2: dict[int, tuple[int, bool]] = {
+    # Letters A–Z
+    4: (0x1E, False), 5: (0x30, False), 6: (0x2E, False), 7: (0x20, False),
+    8: (0x12, False), 9: (0x21, False), 10: (0x22, False), 11: (0x23, False),
+    12: (0x17, False), 13: (0x24, False), 14: (0x25, False), 15: (0x26, False),
+    16: (0x32, False), 17: (0x31, False), 18: (0x18, False), 19: (0x19, False),
+    20: (0x10, False), 21: (0x13, False), 22: (0x1F, False), 23: (0x14, False),
+    24: (0x16, False), 25: (0x2F, False), 26: (0x11, False), 27: (0x2D, False),
+    28: (0x15, False), 29: (0x2C, False),
+    # Digits 1–0
+    30: (0x02, False), 31: (0x03, False), 32: (0x04, False), 33: (0x05, False),
+    34: (0x06, False), 35: (0x07, False), 36: (0x08, False), 37: (0x09, False),
+    38: (0x0A, False), 39: (0x0B, False),
+    # Editing / whitespace
+    40: (0x1C, False),  # Return
+    41: (0x01, False),  # Escape
+    42: (0x0E, False),  # Backspace
+    43: (0x0F, False),  # Tab
+    44: (0x39, False),  # Space
+    # Punctuation
+    45: (0x0C, False),  # Minus / Underscore
+    46: (0x0D, False),  # Equals / Plus
+    47: (0x1A, False),  # LeftBracket
+    48: (0x1B, False),  # RightBracket
+    49: (0x2B, False),  # Backslash
+    51: (0x27, False),  # Semicolon
+    52: (0x28, False),  # Apostrophe
+    53: (0x29, False),  # Grave
+    54: (0x33, False),  # Comma
+    55: (0x34, False),  # Period
+    56: (0x35, False),  # Slash
+    # Lock keys
+    57: (0x3A, False),  # CapsLock
+    83: (0x45, False),  # NumLock
+    71: (0x46, False),  # ScrollLock
+    # Function keys
+    58: (0x3B, False), 59: (0x3C, False), 60: (0x3D, False), 61: (0x3E, False),
+    62: (0x3F, False), 63: (0x40, False), 64: (0x41, False), 65: (0x42, False),
+    66: (0x43, False), 67: (0x44, False), 68: (0x57, False), 69: (0x58, False),
+    # Navigation (extended)
+    73: (0x52, True),   # Insert
+    76: (0x53, True),   # Delete
+    74: (0x47, True),   # Home
+    77: (0x4F, True),   # End
+    75: (0x49, True),   # PageUp
+    78: (0x51, True),   # PageDown
+    82: (0x48, True),   # Up
+    81: (0x50, True),   # Down
+    80: (0x4B, True),   # Left
+    79: (0x4D, True),   # Right
+    # Numpad
+    84: (0x35, True),   # KP_Divide (extended)
+    85: (0x37, False),  # KP_Multiply
+    86: (0x4A, False),  # KP_Minus
+    87: (0x4E, False),  # KP_Plus
+    88: (0x1C, True),   # KP_Enter (extended)
+    89: (0x4F, False),  # KP_1 / End
+    90: (0x50, False),  # KP_2 / Down
+    91: (0x51, False),  # KP_3 / PageDown
+    92: (0x4B, False),  # KP_4 / Left
+    93: (0x4C, False),  # KP_5
+    94: (0x4D, False),  # KP_6 / Right
+    95: (0x47, False),  # KP_7 / Home
+    96: (0x48, False),  # KP_8 / Up
+    97: (0x49, False),  # KP_9 / PageUp
+    98: (0x52, False),  # KP_0 / Insert
+    99: (0x53, False),  # KP_Period / Delete
+    # Modifiers
+    224: (0x1D, False), # LCtrl
+    225: (0x2A, False), # LShift
+    226: (0x38, False), # LAlt
+    227: (0x5B, True),  # LGui / LWin (extended)
+    228: (0x1D, True),  # RCtrl (extended)
+    229: (0x36, False), # RShift
+    230: (0x38, True),  # RAlt (extended)
+    231: (0x5C, True),  # RGui / RWin (extended)
+}
 
 
 class DesktopWindow:
@@ -43,6 +134,7 @@ class DesktopWindow:
         height: int = 1080,
         *,
         render_backend: Literal["auto", "surface", "gpu"] = "auto",
+        clipboard_sync: bool = False,
     ) -> None:
         """Initialize the desktop window.
 
@@ -54,17 +146,28 @@ class DesktopWindow:
                 - auto: try GPU texture path first, fallback to surface blits
                 - surface: force software surface blitting path
                 - gpu: require GPU texture path (falls back if unavailable)
+            clipboard_sync: Enable bidirectional OS clipboard sync via pyperclip.
         """
         self._session = session
         self._width = width
         self._height = height
         self._render_backend = render_backend
+        self._clipboard_sync_requested = clipboard_sync
         self._screen: pygame.Surface | None = None
         self._frame_surface: pygame.Surface | None = None
         self._frame_buffer: memoryview | None = None
         self._gpu_renderer: Any | None = None
         self._gpu_texture: Any | None = None
         self._use_gpu_present = False
+        self._pyperclip: Any | None = None
+        self._clipboard_task: asyncio.Task[None] | None = None
+        self._remote_text_changed = asyncio.Event()
+        self._remote_files_changed = asyncio.Event()
+        self._last_local_clipboard_text = ""
+        self._last_remote_clipboard_text = ""
+        self._last_local_clipboard_files: list[Path] = []
+        self._clipboard_file_cache_dir = Path(tempfile.gettempdir()) / "arrdipi-clipboard"
+        self._initial_clipboard_announced = False
         self._input_tasks: set[asyncio.Task[None]] = set()
         self._pending_dirty_rects: list[Rect] = []
         self._full_present_rect_threshold = 96
@@ -85,9 +188,11 @@ class DesktopWindow:
             "RGBA",
         )
         self._use_gpu_present = self._initialize_gpu_presenter()
-        backend_label = "gpu" if self._use_gpu_present else "surface"
-        pygame.display.set_caption(f"arrdipi ({backend_label})")
         self._running = True
+        self._initialize_clipboard_sync()
+        backend_label = "gpu" if self._use_gpu_present else "surface"
+        clipboard_label = "+clipboard" if self._clipboard_task is not None else ""
+        pygame.display.set_caption(f"arrdipi ({backend_label}{clipboard_label})")
 
         self._session.on_graphics_update(self._on_graphics_update)
         self._session.on_disconnect(self._on_disconnect)
@@ -100,6 +205,11 @@ class DesktopWindow:
         for task in self._input_tasks:
             task.cancel()
         self._input_tasks.clear()
+        if self._clipboard_task is not None:
+            self._clipboard_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._clipboard_task
+            self._clipboard_task = None
         pygame.quit()
 
     async def _process_pygame_events(self) -> None:
@@ -119,13 +229,19 @@ class DesktopWindow:
                 case pygame.QUIT:
                     self._running = False
                 case pygame.KEYDOWN:
-                    self._spawn_input_task(
-                        self._session.send_key(event.scancode, is_released=False)
-                    )
+                    ps2 = _SDL_TO_PS2.get(event.scancode)
+                    if ps2 is not None:
+                        scan_code, is_extended = ps2
+                        self._spawn_input_task(
+                            self._session.send_key(scan_code, is_released=False, is_extended=is_extended)
+                        )
                 case pygame.KEYUP:
-                    self._spawn_input_task(
-                        self._session.send_key(event.scancode, is_released=True)
-                    )
+                    ps2 = _SDL_TO_PS2.get(event.scancode)
+                    if ps2 is not None:
+                        scan_code, is_extended = ps2
+                        self._spawn_input_task(
+                            self._session.send_key(scan_code, is_released=True, is_extended=is_extended)
+                        )
                 case pygame.MOUSEMOTION:
                     self._spawn_input_task(self._session.send_mouse_move(*event.pos))
                 case pygame.MOUSEBUTTONDOWN:
@@ -219,6 +335,210 @@ class DesktopWindow:
         self._gpu_renderer = renderer
         self._gpu_texture = texture
         return True
+
+    def _initialize_clipboard_sync(self) -> None:
+        """Initialize optional clipboard sync loop and callbacks."""
+        if not self._clipboard_sync_requested:
+            return
+        clipboard = self._session.clipboard
+        if clipboard is None:
+            logger.warning("Clipboard sync requested, but cliprdr channel is unavailable")
+            return
+
+        try:
+            self._pyperclip = importlib.import_module("pyperclip")
+        except ImportError:
+            logger.warning("Clipboard sync requested, but pyperclip is not installed")
+            return
+
+        try:
+            local_text = self._pyperclip.paste()
+            if isinstance(local_text, str):
+                self._last_local_clipboard_text = local_text
+        except Exception as exc:
+            logger.warning("Unable to read local clipboard: %s", exc)
+
+        self._session.on_clipboard_changed(self._on_clipboard_changed)
+        if clipboard.server_formats:
+            self._on_server_formats(clipboard.server_formats)
+        self._clipboard_task = asyncio.create_task(self._clipboard_sync_loop())
+
+    async def _clipboard_sync_loop(self) -> None:
+        """Synchronize local and remote text clipboard using CLIPRDR."""
+        assert self._pyperclip is not None
+        clipboard = self._session.clipboard
+        if clipboard is None:
+            return
+
+        while self._running:
+            if not self._initial_clipboard_announced and clipboard.ready:
+                self._initial_clipboard_announced = True
+                if self._last_local_clipboard_text:
+                    try:
+                        await clipboard.set_clipboard_text(self._last_local_clipboard_text)
+                    except Exception as exc:
+                        logger.warning("Failed to send initial local clipboard: %s", exc)
+                file_paths = self._read_local_clipboard_file_paths()
+                if file_paths:
+                    self._last_local_clipboard_files = file_paths
+                    try:
+                        await clipboard.set_clipboard_files(file_paths)
+                    except Exception as exc:
+                        logger.warning("Failed to send initial local files: %s", exc)
+
+            if self._remote_text_changed.is_set():
+                self._remote_text_changed.clear()
+                try:
+                    remote_text = await clipboard.get_server_clipboard_text(timeout=1.0)
+                except Exception as exc:
+                    logger.warning("Failed to read remote clipboard: %s", exc)
+                else:
+                    if remote_text and remote_text != self._last_local_clipboard_text:
+                        try:
+                            self._pyperclip.copy(remote_text)
+                            self._last_local_clipboard_text = remote_text
+                            self._last_remote_clipboard_text = remote_text
+                        except Exception as exc:
+                            logger.warning("Failed to write local clipboard: %s", exc)
+
+            if self._remote_files_changed.is_set():
+                self._remote_files_changed.clear()
+                try:
+                    files = await clipboard.get_server_clipboard_files(
+                        destination_dir=self._clipboard_file_cache_dir,
+                        timeout=30.0,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to fetch remote clipboard files: %s", exc)
+                else:
+                    if files:
+                        self._set_local_clipboard_file_paths(files)
+                        self._last_local_clipboard_files = files
+
+            try:
+                local_text = self._pyperclip.paste()
+            except Exception as exc:
+                logger.warning("Failed to read local clipboard: %s", exc)
+            else:
+                if (
+                    isinstance(local_text, str)
+                    and clipboard.ready
+                    and local_text != self._last_local_clipboard_text
+                    and local_text != self._last_remote_clipboard_text
+                ):
+                    self._last_local_clipboard_text = local_text
+                    try:
+                        await clipboard.set_clipboard_text(local_text)
+                    except Exception as exc:
+                        logger.warning("Failed to send local clipboard: %s", exc)
+
+            local_files = self._read_local_clipboard_file_paths()
+            if (
+                clipboard.ready
+                and local_files
+                and local_files != self._last_local_clipboard_files
+            ):
+                self._last_local_clipboard_files = local_files
+                try:
+                    await clipboard.set_clipboard_files(local_files)
+                except Exception as exc:
+                    logger.warning("Failed to send local file clipboard: %s", exc)
+
+            await asyncio.sleep(0.25)
+
+    def _on_server_formats(self, clipboard_data: Any) -> None:
+        """Process remote format list and trigger pull events."""
+        if not isinstance(clipboard_data, list):
+            return
+        has_text = any(getattr(fmt, "format_id", None) == CF_UNICODETEXT for fmt in clipboard_data)
+        has_file_group = any(
+            getattr(fmt, "format_name", "").casefold()
+            in {FILE_GROUP_DESCRIPTOR_W.casefold(), FILE_GROUP_DESCRIPTOR.casefold()}
+            for fmt in clipboard_data
+        )
+        has_file_contents = any(
+            getattr(fmt, "format_name", "").casefold() == FILE_CONTENTS.casefold()
+            for fmt in clipboard_data
+        )
+        if has_text:
+            self._remote_text_changed.set()
+        if has_file_group and has_file_contents:
+            self._remote_files_changed.set()
+
+    async def _on_clipboard_changed(self, clipboard_data: Any) -> None:
+        """Mark that remote clipboard formats changed."""
+        self._on_server_formats(clipboard_data)
+
+    def _read_local_clipboard_file_paths(self) -> list[Path]:
+        """Read local file clipboard entries (macOS supported)."""
+        if sys.platform != "darwin":
+            return []
+        script = (
+            'try\n'
+            'set f to (the clipboard as «class furl»)\n'
+            'set p to POSIX path of (f as alias)\n'
+            'return p\n'
+            'on error\n'
+            'return ""\n'
+            'end try\n'
+        )
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+
+        path_str = result.stdout.strip()
+        if not path_str:
+            return []
+        path = Path(path_str)
+        if not path.is_file():
+            return []
+        return [path.resolve()]
+
+    def _set_local_clipboard_file_paths(self, paths: list[Path]) -> None:
+        """Set local clipboard file entries (macOS supported)."""
+        if sys.platform != "darwin" or not paths:
+            return
+        valid_paths = [str(p) for p in paths if p.exists()]
+        if not valid_paths:
+            return
+
+        # Pass paths as argv to avoid any injection via string interpolation.
+        # osascript receives them as items of the `argv` list.
+        if len(valid_paths) == 1:
+            script = (
+                "on run argv\n"
+                "set the clipboard to (POSIX file (item 1 of argv))\n"
+                "end run\n"
+            )
+        else:
+            set_lines = "\n".join(
+                f"set end of fileList to (POSIX file (item {i + 1} of argv))"
+                for i in range(len(valid_paths))
+            )
+            script = (
+                "on run argv\n"
+                "set fileList to {}\n"
+                f"{set_lines}\n"
+                "set the clipboard to fileList\n"
+                "end run\n"
+            )
+        try:
+            subprocess.run(
+                ["osascript", "-e", script, "--", *valid_paths],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("Failed to set local file clipboard entries")
 
     def _present_pending_updates(self) -> None:
         """Present queued dirty rectangles in batches to avoid row-by-row redraws."""

@@ -140,6 +140,20 @@ class TestBuildParser:
             )
             assert args.render_backend == choice
 
+    def test_clipboard_sync_flag(self) -> None:
+        """--clipboard-sync enables OS clipboard synchronization."""
+        parser = build_parser()
+        args = parser.parse_args(
+            ["connect", "--host", "srv", "--user", "u", "--clipboard-sync"]
+        )
+        assert args.clipboard_sync is True
+
+    def test_clipboard_sync_default_disabled(self) -> None:
+        """--clipboard-sync defaults to False."""
+        parser = build_parser()
+        args = parser.parse_args(["connect", "--host", "srv", "--user", "u"])
+        assert args.clipboard_sync is False
+
     def test_invalid_render_backend_rejected(self) -> None:
         """--render-backend rejects invalid values."""
         parser = build_parser()
@@ -383,6 +397,7 @@ class TestRunConnect:
             width=1280,
             height=720,
             render_backend="auto",
+            clipboard_sync=False,
         )
 
     def test_drive_paths_parsed(self) -> None:

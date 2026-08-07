@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from arrdipi.channels.clipboard import CF_UNICODETEXT, CLIPRDR_FORMAT_LIST
 from arrdipi.pdu.capabilities import FASTPATH_OUTPUT_SUPPORTED, GeneralCapabilitySet
 from arrdipi.pdu.fastpath import (
     FastPathInputPdu,
@@ -713,6 +714,40 @@ class TestStart:
         assert session._dispatch_task is not None
 
         await session.close()
+
+    @pytest.mark.asyncio
+    async def test_start_initializes_clipboard_channel(self) -> None:
+        """start() wires cliprdr to ClipboardChannel."""
+        session, _, _, _, mock_x224 = _make_session(channel_map={1004: "cliprdr"})
+        mock_x224.recv_any = AsyncMock(side_effect=asyncio.CancelledError)
+
+        await session.start()
+        await asyncio.sleep(0.01)
+
+        assert session.clipboard is not None
+        await session.close()
+
+
+class TestClipboardDispatch:
+    """Tests for clipboard CLIPRDR dispatch integration."""
+
+    @pytest.mark.asyncio
+    async def test_server_format_list_triggers_callback(self) -> None:
+        """Server CLIPRDR format-list event triggers session callback."""
+        session, _, _, _, _ = _make_session(channel_map={1004: "cliprdr"})
+        session._init_channels()
+
+        callback = AsyncMock()
+        session.on_clipboard_changed(callback)
+
+        # CLIPRDR FORMAT_LIST header + single long-format entry (CF_UNICODETEXT)
+        body = struct.pack("<I", CF_UNICODETEXT) + b"\x00\x00"
+        pdu = struct.pack("<HHI", CLIPRDR_FORMAT_LIST, 0, len(body)) + body
+        channel_pdu = struct.pack("<II", len(pdu), 0x00000003) + pdu
+
+        await session._route_pdu(1004, channel_pdu)
+
+        callback.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

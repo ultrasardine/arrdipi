@@ -112,7 +112,9 @@ class TestFormatListPdu:
         formats = [ClipboardFormat(format_id=CF_UNICODETEXT, format_name="Unicode")]
         pdu = FormatListPdu(formats=formats, use_long_names=False)
         data = pdu.serialize()
+        msg_flags = struct.unpack_from("<H", data, 2)[0]
         body = data[8:]
+        assert msg_flags == 0x0004  # CB_ASCII_NAMES
         # Short format: 4 bytes format_id + 32 bytes name = 36 bytes per entry
         assert len(body) == 36
 
@@ -175,41 +177,48 @@ class TestClipboardChannel:
 
     @pytest.mark.asyncio
     async def test_monitor_ready_handshake(self) -> None:
-        """Monitor Ready → sends Capabilities + Temporary Directory."""
+        """Monitor Ready → sends Capabilities + TemporaryDirectory (no Format List when clipboard empty)."""
         send_fn = AsyncMock()
         channel = ClipboardChannel(send_fn)
 
-        # Simulate server sending Monitor Ready
         monitor_ready = struct.pack("<HHI", CLIPRDR_MONITOR_READY, 0, 0)
         await channel.handle_message(monitor_ready)
 
         assert channel.ready is True
         assert send_fn.call_count == 2
 
-        # First call: Capabilities PDU
-        caps_data = send_fn.call_args_list[0][0][0]
-        caps_type = struct.unpack_from("<H", caps_data, 0)[0]
-        assert caps_type == CLIPRDR_CAPABILITIES
-
-        # Second call: Temporary Directory PDU
-        temp_data = send_fn.call_args_list[1][0][0]
-        temp_type = struct.unpack_from("<H", temp_data, 0)[0]
-        assert temp_type == CLIPRDR_TEMP_DIRECTORY
+        assert struct.unpack_from("<H", send_fn.call_args_list[0][0][0], 0)[0] == CLIPRDR_CAPABILITIES
+        assert struct.unpack_from("<H", send_fn.call_args_list[1][0][0], 0)[0] == CLIPRDR_TEMP_DIRECTORY
 
     @pytest.mark.asyncio
     async def test_set_clipboard_text_sends_format_list(self) -> None:
-        """set_clipboard_text() sends Format List with CF_UNICODETEXT."""
+        """set_clipboard_text() sends Format List with CF_UNICODETEXT once channel is ready."""
         send_fn = AsyncMock()
         channel = ClipboardChannel(send_fn)
 
+        # Not ready yet — no-op
         await channel.set_clipboard_text("Hello, World!")
+        send_fn.assert_not_called()
 
-        send_fn.assert_called_once()
-        data = send_fn.call_args[0][0]
-        msg_type = struct.unpack_from("<H", data, 0)[0]
-        assert msg_type == CLIPRDR_FORMAT_LIST
+        # Make ready: Monitor Ready sends Capabilities + TempDir + Format List
+        # (because _local_clipboard_text is already set from the call above)
+        monitor_ready = struct.pack("<HHI", CLIPRDR_MONITOR_READY, 0, 0)
+        await channel.handle_message(monitor_ready)
+        assert send_fn.call_count == 3
+        assert struct.unpack_from("<H", send_fn.call_args_list[0][0][0], 0)[0] == CLIPRDR_CAPABILITIES
+        assert struct.unpack_from("<H", send_fn.call_args_list[1][0][0], 0)[0] == CLIPRDR_TEMP_DIRECTORY
+        assert struct.unpack_from("<H", send_fn.call_args_list[2][0][0], 0)[0] == CLIPRDR_FORMAT_LIST
 
-        # Parse the format list body
+        # Simulate server acking so the next announce isn't blocked
+        ack = struct.pack("<HHI", CLIPRDR_FORMAT_LIST_RESPONSE, CB_RESPONSE_OK, 0)
+        await channel.handle_message(ack)
+
+        # set_clipboard_text with new text sends another Format List
+        await channel.set_clipboard_text("New text")
+        assert send_fn.call_count == 4
+
+        data = send_fn.call_args_list[3][0][0]
+        assert struct.unpack_from("<H", data, 0)[0] == CLIPRDR_FORMAT_LIST
         data_len = struct.unpack_from("<I", data, 4)[0]
         body = data[8 : 8 + data_len]
         format_list = FormatListPdu.parse(body, use_long_names=True)
@@ -263,6 +272,21 @@ class TestClipboardChannel:
         response = send_fn.call_args[0][0]
         resp_type = struct.unpack_from("<H", response, 0)[0]
         assert resp_type == CLIPRDR_FORMAT_LIST_RESPONSE
+
+    @pytest.mark.asyncio
+    async def test_handle_server_format_list_ascii_names(self) -> None:
+        """Server short/ascii format list is parsed using CB_ASCII_NAMES."""
+        send_fn = AsyncMock()
+        channel = ClipboardChannel(send_fn)
+
+        formats = [ClipboardFormat(format_id=CF_UNICODETEXT, format_name="Unicode")]
+        format_list = FormatListPdu(formats=formats, use_long_names=False)
+        pdu_data = format_list.serialize()
+
+        await channel.handle_message(pdu_data)
+
+        assert len(channel.server_formats) == 1
+        assert channel.server_formats[0].format_id == CF_UNICODETEXT
 
     @pytest.mark.asyncio
     async def test_get_server_clipboard_text(self) -> None:

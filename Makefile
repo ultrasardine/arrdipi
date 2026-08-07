@@ -12,8 +12,23 @@ test: ## Run the test suite
 test-v: ## Run tests with verbose output
 	uv run pytest -v
 
-run: ## Run the application
+run: ## Run the application (interactive menu)
 	uv run python main.py
+
+connect: ## Connect to RDP server (set HOST=host[:port], USER=, PASS= and optionally SECURITY=, WIDTH=, HEIGHT=, NOCERT=1)
+	$(eval _HOST := $(firstword $(subst :, ,$(HOST))))
+	$(eval _PORT := $(or $(word 2,$(subst :, ,$(HOST))),3389))
+	uv run arrdipi connect \
+		--host "$(_HOST)" \
+		--port $(_PORT) \
+		--user "$(USER)" \
+		--password "$(PASS)" \
+		$(if $(SECURITY),--security $(SECURITY),) \
+		$(if $(WIDTH),--width $(WIDTH),) \
+		$(if $(HEIGHT),--height $(HEIGHT),) \
+		$(if $(NOCERT),--no-verify-cert,) \
+		--clipboard-sync \
+		--debug
 
 menu: ## Open the interactive terminal menu
 	uv run arrdipi menu

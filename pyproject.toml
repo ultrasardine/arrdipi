@@ -33,6 +33,7 @@ dependencies = [
     "av",
     "cryptography",
     "pygame",
+    "pyperclip",
     "pyspnego",
     "sounddevice",
 ]

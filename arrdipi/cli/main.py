@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 from typing import TYPE_CHECKING
@@ -116,6 +117,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Display backend (default: auto). Use 'gpu' to prefer hardware renderer.",
     )
+    connect_parser.add_argument(
+        "--clipboard-sync",
+        action="store_true",
+        help="Enable bidirectional OS clipboard sync over CLIPRDR (requires pyperclip)",
+    )
+    connect_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable DEBUG logging to stderr",
+    )
 
     return parser
 
@@ -178,6 +189,7 @@ def _run_connect(args: argparse.Namespace, password: str) -> None:
                 width=args.width,
                 height=args.height,
                 render_backend=args.render_backend,
+                clipboard_sync=args.clipboard_sync,
             )
             await window.run()
         finally:
@@ -206,6 +218,17 @@ def main() -> None:
         sys.exit(0)
 
     if args.command == "connect":
+        logging.basicConfig(
+            level=logging.DEBUG if getattr(args, "debug", False) else logging.INFO,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+            stream=sys.stderr,
+        )
+        if getattr(args, "debug", False):
+            # Also write to a file so nothing is lost if stderr is redirected
+            fh = logging.FileHandler("/tmp/arrdipi_debug.log", mode="w")
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+            logging.getLogger().addHandler(fh)
         # Resolve password: --password flag takes precedence over env var (Req 28, AC 8)
         password = args.password
         if password is None:

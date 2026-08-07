@@ -373,6 +373,7 @@ def _screen_config_builder() -> None:
     domain = _ask("Domain", "")
     security = _ask("Security (auto/rdp/tls/nla)", "auto")
     render_backend = _ask("Render backend (auto/surface/gpu)", "auto")
+    clipboard_sync = _ask("Enable clipboard sync (yes/no)", "no")
     width = _ask("Width", "1920")
     height = _ask("Height", "1080")
     verify_cert = _ask("Verify TLS certificate (yes/no)", "yes")
@@ -421,6 +422,8 @@ def _screen_config_builder() -> None:
         cmd_parts.append(f"--domain {domain}")
     cmd_parts.append(f"--security {security}")
     cmd_parts.append(f"--render-backend {render_backend}")
+    if clipboard_sync.lower() in ("yes", "y", "true", "1"):
+        cmd_parts.append("--clipboard-sync")
     if verify_str == "False":
         cmd_parts.append("--no-verify-cert")
     cmd_parts.append(f"--width {width}")
@@ -554,6 +557,10 @@ def _screen_connect_cli() -> None:
         input(f"  {GREEN}▸{RESET} Render backend (auto/surface/gpu) [auto]: ").strip()
         or "auto"
     )
+    clipboard_sync = (
+        input(f"  {GREEN}▸{RESET} Enable clipboard sync (yes/no) [no]: ").strip()
+        or "no"
+    )
     verify_cert = input(
         f"  {GREEN}▸{RESET} Verify TLS certificate (yes/no) [yes]: "
     ).strip() or "yes"
@@ -577,6 +584,8 @@ def _screen_connect_cli() -> None:
     )
     if no_verify_cert:
         cmd += " --no-verify-cert"
+    if clipboard_sync.lower() in ("yes", "y", "true", "1"):
+        cmd += " --clipboard-sync"
     os.environ["ARRDIPI_PASSWORD"] = password
     try:
         os.system(cmd)
