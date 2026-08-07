@@ -5,7 +5,7 @@ Public API exports for the arrdipi package.
 
 from __future__ import annotations
 
-__version__ = "0.1.0"  # x-release-please-version
+__version__ = "0.2.0"  # x-release-please-version
 
 from arrdipi.channels.audio_input import AudioInputChannel
 from arrdipi.channels.audio_output import AudioOutputChannel
