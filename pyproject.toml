@@ -1,6 +1,6 @@
 [project]
 name = "arrdipi"
-version = "0.2.0"
+version = "0.2.1"
 description = "A pure Python RDP client library implementing the full protocol stack"
 readme = "README.md"
 license = "MIT"
