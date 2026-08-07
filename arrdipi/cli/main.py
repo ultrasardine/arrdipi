@@ -88,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Security mode (default: auto)",
     )
     connect_parser.add_argument(
+        "--no-verify-cert",
+        action="store_true",
+        help="Disable TLS certificate verification (for trusted self-signed servers)",
+    )
+    connect_parser.add_argument(
         "--width",
         type=int,
         default=1920,
@@ -104,6 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help='Drive redirection in format "NAME:PATH" or "NAME:PATH:ro" (can be specified multiple times)',
+    )
+    connect_parser.add_argument(
+        "--render-backend",
+        choices=["auto", "surface", "gpu"],
+        default="auto",
+        help="Display backend (default: auto). Use 'gpu' to prefer hardware renderer.",
     )
 
     return parser
@@ -151,6 +162,7 @@ def _run_connect(args: argparse.Namespace, password: str) -> None:
             password=password,
             domain=args.domain,
             security=args.security,
+            verify_cert=not args.no_verify_cert,
             width=args.width,
             height=args.height,
             drive_paths=drive_paths or None,
@@ -161,7 +173,12 @@ def _run_connect(args: argparse.Namespace, password: str) -> None:
                 raise ImportError(
                     "DesktopWindow not available. Install pygame and ensure arrdipi.cli.window exists."
                 )
-            window = DesktopWindow(session, width=args.width, height=args.height)
+            window = DesktopWindow(
+                session,
+                width=args.width,
+                height=args.height,
+                render_backend=args.render_backend,
+            )
             await window.run()
         finally:
             await session.disconnect()

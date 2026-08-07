@@ -701,6 +701,7 @@ class TestFullExecute:
             patch("arrdipi.connection.X224Layer", return_value=mock_x224),
             patch.object(seq, "_create_security_layer", return_value=mock_security),
             patch("arrdipi.connection.McsLayer", return_value=mock_mcs),
+            patch.object(Session, "start", new_callable=AsyncMock) as mock_start,
         ):
             session = await seq.execute()
 
@@ -709,6 +710,7 @@ class TestFullExecute:
         assert session._mcs is mock_mcs
         assert session._security is mock_security
         assert session._config is default_config
+        mock_start.assert_awaited_once_with()
 
 
 # ---------------------------------------------------------------------------

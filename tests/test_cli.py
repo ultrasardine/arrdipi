@@ -65,6 +65,20 @@ class TestBuildParser:
         args = parser.parse_args(["connect", "--host", "srv", "--user", "u"])
         assert args.security == "auto"
 
+    def test_default_verify_cert_enabled(self) -> None:
+        """TLS certificate verification is enabled by default."""
+        parser = build_parser()
+        args = parser.parse_args(["connect", "--host", "srv", "--user", "u"])
+        assert args.no_verify_cert is False
+
+    def test_no_verify_cert_flag(self) -> None:
+        """--no-verify-cert disables TLS certificate verification."""
+        parser = build_parser()
+        args = parser.parse_args(
+            ["connect", "--host", "srv", "--user", "u", "--no-verify-cert"]
+        )
+        assert args.no_verify_cert is True
+
     def test_security_choices(self) -> None:
         """--security accepts auto, rdp, tls, nla."""
         parser = build_parser()
@@ -88,6 +102,7 @@ class TestBuildParser:
         args = parser.parse_args(["connect", "--host", "srv", "--user", "u"])
         assert args.width == 1920
         assert args.height == 1080
+        assert args.render_backend == "auto"
 
     def test_custom_width_height(self) -> None:
         """--width and --height can be set to custom values."""
@@ -107,6 +122,39 @@ class TestBuildParser:
         )
         assert args.width == 1280
         assert args.height == 720
+
+    def test_render_backend_choices(self) -> None:
+        """--render-backend accepts auto, surface, gpu."""
+        parser = build_parser()
+        for choice in ("auto", "surface", "gpu"):
+            args = parser.parse_args(
+                [
+                    "connect",
+                    "--host",
+                    "srv",
+                    "--user",
+                    "u",
+                    "--render-backend",
+                    choice,
+                ]
+            )
+            assert args.render_backend == choice
+
+    def test_invalid_render_backend_rejected(self) -> None:
+        """--render-backend rejects invalid values."""
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "connect",
+                    "--host",
+                    "srv",
+                    "--user",
+                    "u",
+                    "--render-backend",
+                    "invalid",
+                ]
+            )
 
     def test_password_optional(self) -> None:
         """--password is optional and defaults to None."""
@@ -325,9 +373,16 @@ class TestRunConnect:
             password="mypass",
             domain="CORP",
             security="nla",
+            verify_cert=True,
             width=1280,
             height=720,
             drive_paths=None,
+        )
+        mock_window_cls.assert_called_once_with(
+            mock_session,
+            width=1280,
+            height=720,
+            render_backend="auto",
         )
 
     def test_drive_paths_parsed(self) -> None:
@@ -369,6 +424,37 @@ class TestRunConnect:
         assert drive_paths[1].name == "docs"
         assert drive_paths[1].path == "/home"
         assert drive_paths[1].read_only is True
+
+    def test_no_verify_cert_passed_to_connect(self) -> None:
+        """_run_connect maps --no-verify-cert to verify_cert=False."""
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "connect",
+                "--host",
+                "10.0.0.1",
+                "--user",
+                "admin",
+                "--no-verify-cert",
+            ]
+        )
+
+        mock_session = AsyncMock()
+        mock_session.disconnect = AsyncMock()
+        mock_window = MagicMock()
+        mock_window.run = AsyncMock()
+
+        with (
+            patch(
+                "arrdipi.connect",
+                new_callable=AsyncMock,
+                return_value=mock_session,
+            ) as mock_connect,
+            patch("arrdipi.cli.main.DesktopWindow", return_value=mock_window),
+        ):
+            _run_connect(args, "mypass")
+
+        assert mock_connect.call_args.kwargs["verify_cert"] is False
 
     def test_disconnect_called_on_window_close(self) -> None:
         """Session.disconnect() is called after window closes."""

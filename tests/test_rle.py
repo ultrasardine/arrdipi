@@ -98,10 +98,10 @@ class TestRleCompressed:
 
     def test_color_run_8bpp(self) -> None:
         """8-bit color run produces repeated pixels."""
-        # REGULAR_COLOR_RUN: opcode 0x34 = order_type 0x03, run_length = 4+1=5
+        # REGULAR_COLOR_RUN: code id=0x03, run_length=5 -> 0x65
         # Followed by 1 byte color value
         width, height = 5, 1
-        opcode = 0x34  # order_type=3, low_nibble=4 -> run_length=5
+        opcode = 0x65
         color = 0x80
         data = bytes([opcode, color])
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
@@ -112,8 +112,8 @@ class TestRleCompressed:
     def test_color_run_16bpp(self) -> None:
         """16-bit color run produces repeated pixels."""
         width, height = 3, 1
-        # REGULAR_COLOR_RUN: opcode 0x32 = order_type 0x03, run_length = 2+1=3
-        opcode = 0x32
+        # REGULAR_COLOR_RUN: code id=0x03, run_length=3 -> 0x63
+        opcode = 0x63
         # RGB565 green: R=0, G=63, B=0 -> 0x07E0 -> LE: 0xE0, 0x07
         color = bytes([0xE0, 0x07])
         data = bytes([opcode]) + color
@@ -125,8 +125,8 @@ class TestRleCompressed:
     def test_color_run_24bpp(self) -> None:
         """24-bit color run produces repeated pixels."""
         width, height = 2, 1
-        # REGULAR_COLOR_RUN: opcode 0x31 = order_type 0x03, run_length = 1+1=2
-        opcode = 0x31
+        # REGULAR_COLOR_RUN: code id=0x03, run_length=2 -> 0x62
+        opcode = 0x62
         # BGR: B=255, G=0, R=0 -> blue
         color = bytes([0xFF, 0x00, 0x00])
         data = bytes([opcode]) + color
@@ -138,8 +138,8 @@ class TestRleCompressed:
     def test_color_run_32bpp(self) -> None:
         """32-bit color run produces repeated pixels."""
         width, height = 2, 1
-        # REGULAR_COLOR_RUN: opcode 0x31 = order_type 0x03, run_length = 1+1=2
-        opcode = 0x31
+        # REGULAR_COLOR_RUN: code id=0x03, run_length=2 -> 0x62
+        opcode = 0x62
         # BGRX: B=0, G=255, R=0, X=0 -> green
         color = bytes([0x00, 0xFF, 0x00, 0x00])
         data = bytes([opcode]) + color
@@ -151,8 +151,8 @@ class TestRleCompressed:
     def test_color_image_8bpp(self) -> None:
         """8-bit color image writes individual pixel values."""
         width, height = 3, 1
-        # REGULAR_COLOR_IMAGE: opcode 0x42 = order_type 0x04, run_length = 2+1=3
-        opcode = 0x42
+        # REGULAR_COLOR_IMAGE: code id=0x04, run_length=3 -> 0x83
+        opcode = 0x83
         pixels = bytes([10, 20, 30])
         data = bytes([opcode]) + pixels
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
@@ -166,14 +166,14 @@ class TestRleCompressed:
     def test_black_order(self) -> None:
         """BLACK_ORDER writes a single black pixel."""
         width, height = 1, 1
-        data = bytes([0xF9])  # BLACK_ORDER
+        data = bytes([0xFE])  # BLACK_ORDER
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
         assert result == bytes([0, 0, 0, 255])
 
     def test_white_order_8bpp(self) -> None:
         """WHITE_ORDER writes a single white pixel at 8bpp."""
         width, height = 1, 1
-        data = bytes([0xFA])  # WHITE_ORDER
+        data = bytes([0xFD])  # WHITE_ORDER
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
         # 8bpp white = 0xFF -> grayscale 255
         assert result == bytes([255, 255, 255, 255])
@@ -181,15 +181,15 @@ class TestRleCompressed:
     def test_white_order_24bpp(self) -> None:
         """WHITE_ORDER writes a single white pixel at 24bpp."""
         width, height = 1, 1
-        data = bytes([0xFA])  # WHITE_ORDER
+        data = bytes([0xFD])  # WHITE_ORDER
         result = RleCodec.decompress(data, width, height, 24, compressed=True)
         assert result == bytes([255, 255, 255, 255])
 
     def test_bg_run_first_scanline(self) -> None:
         """Background run on first scanline writes black pixels."""
         width, height = 3, 1
-        # REGULAR_BG_RUN: opcode 0x02 = order_type 0x00, run_length = 2+1=3
-        opcode = 0x02
+        # REGULAR_BG_RUN: code id=0x00, run_length=3 -> 0x03
+        opcode = 0x03
         data = bytes([opcode])
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
         # Background is black on first scanline
@@ -199,8 +199,8 @@ class TestRleCompressed:
     def test_fg_run_first_scanline(self) -> None:
         """Foreground run on first scanline writes foreground color."""
         width, height = 3, 1
-        # REGULAR_FG_RUN: opcode 0x12 = order_type 0x01, run_length = 2+1=3
-        opcode = 0x12
+        # REGULAR_FG_RUN: code id=0x01, run_length=3 -> 0x23
+        opcode = 0x23
         data = bytes([opcode])
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
         # Default foreground is 0xFF for 8bpp
@@ -208,16 +208,16 @@ class TestRleCompressed:
         assert result == expected
 
     def test_extended_run_length(self) -> None:
-        """Extended run length (low nibble = 0) reads next byte."""
-        width, height = 10, 1
-        # REGULAR_COLOR_RUN with low nibble 0: opcode 0x30
-        # Next byte = 9 -> run_length = 9 + 1 = 10
-        opcode = 0x30
-        ext_length = 9  # run_length = 9 + 1 = 10
+        """Extended run length (regular MEGA run) reads next byte."""
+        width, height = 40, 1
+        # REGULAR_COLOR_RUN mega form: opcode 0x60 + next byte.
+        # Next byte = 8 -> run_length = 8 + 32 = 40
+        opcode = 0x60
+        ext_length = 8
         color = 0x42
         data = bytes([opcode, ext_length, color])
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
-        expected = bytes([0x42, 0x42, 0x42, 255] * 10)
+        expected = bytes([0x42, 0x42, 0x42, 255] * 40)
         assert result == expected
 
     def test_bg_run_second_scanline_copies_above(self) -> None:
@@ -225,8 +225,8 @@ class TestRleCompressed:
         width, height = 2, 2
         # First scanline: color run of 2 pixels with value 0x80
         # Second scanline: bg run of 2 pixels (copies from above)
-        color_run = bytes([0x31, 0x80])  # COLOR_RUN: 2 pixels of 0x80
-        bg_run = bytes([0x01])  # BG_RUN: 2 pixels (copies from above)
+        color_run = bytes([0x62, 0x80])  # COLOR_RUN: 2 pixels of 0x80
+        bg_run = bytes([0x02])  # BG_RUN: 2 pixels (copies from above)
         data = color_run + bg_run
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
         # After flip: top row was second scanline (copy of first)
@@ -238,7 +238,7 @@ class TestRleCompressed:
         """Truncated RLE color image data raises RleDecodeError."""
         width, height = 5, 1
         # COLOR_IMAGE expecting 5 pixels at 32bpp = 20 bytes, but provide only 4
-        opcode = 0x44  # order_type=4, run_length=4+1=5
+        opcode = 0x85  # code id=4, run_length=5
         data = bytes([opcode, 0x00, 0x00, 0x00, 0x00])  # Only 1 pixel worth
         with pytest.raises(RleDecodeError) as exc_info:
             RleCodec.decompress(data, width, height, 32, compressed=True)
@@ -247,15 +247,15 @@ class TestRleCompressed:
     def test_unknown_opcode_raises_error(self) -> None:
         """Unknown RLE opcode raises RleDecodeError."""
         width, height = 1, 1
-        # 0x50 has order_type 0x05 which is not defined
-        data = bytes([0x50])
+        # 0xA0 has code id 0x05 which is not defined
+        data = bytes([0xA0])
         with pytest.raises(RleDecodeError) as exc_info:
             RleCodec.decompress(data, width, height, 8, compressed=True)
         assert "Unknown RLE opcode" in str(exc_info.value)
 
     def test_rect_index_in_error(self) -> None:
         """RleDecodeError includes the correct rectangle index."""
-        data = bytes([0x50])  # Unknown opcode
+        data = bytes([0xA0])  # Unknown opcode
         with pytest.raises(RleDecodeError) as exc_info:
             RleCodec.decompress(data, 1, 1, 8, compressed=True, rect_index=7)
         assert exc_info.value.rect_index == 7
@@ -263,9 +263,8 @@ class TestRleCompressed:
     def test_set_fg_fg_run(self) -> None:
         """LITE_SET_FG_FG_RUN sets foreground and writes run."""
         width, height = 3, 1
-        # LITE_SET_FG_FG_RUN: opcode 0xC2 = order_type 0x0C, low_nibble=2
-        # run_length = 2+1 = 3, followed by new fg color
-        opcode = 0xC2
+        # LITE_SET_FG_FG_RUN: opcode 0xC3, run_length = 3
+        opcode = 0xC3
         fg = 0x42
         data = bytes([opcode, fg])
         result = RleCodec.decompress(data, width, height, 8, compressed=True)
@@ -276,9 +275,8 @@ class TestRleCompressed:
     def test_dithered_run(self) -> None:
         """LITE_DITHERED_RUN alternates two colors."""
         width, height = 4, 1
-        # LITE_DITHERED_RUN: opcode 0xE1 = order_type 0x0E, low_nibble=1
-        # run_length = 1+1 = 2, produces 2*2=4 pixels alternating
-        opcode = 0xE1
+        # LITE_DITHERED_RUN: opcode 0xE2, run_length = 2 (pairs)
+        opcode = 0xE2
         color1 = 0x10
         color2 = 0x20
         data = bytes([opcode, color1, color2])

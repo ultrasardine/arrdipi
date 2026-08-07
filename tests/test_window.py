@@ -22,6 +22,7 @@ def mock_session():
     session.send_mouse_button = AsyncMock()
     session.send_mouse_scroll = AsyncMock()
     session.on_graphics_update = MagicMock()
+    session.on_disconnect = MagicMock()
 
     # Surface mock
     surface = MagicMock()
@@ -101,7 +102,9 @@ class TestDesktopWindowRun:
 
             mock_pygame.init.assert_called_once()
             mock_pygame.display.set_mode.assert_called_once_with((1920, 1080))
-            mock_pygame.display.set_caption.assert_called_once_with("arrdipi")
+            mock_pygame.display.set_caption.assert_called_once()
+            caption = mock_pygame.display.set_caption.call_args.args[0]
+            assert caption.startswith("arrdipi (")
             mock_pygame.quit.assert_called_once()
 
     @pytest.mark.asyncio
@@ -233,7 +236,7 @@ class TestProcessPygameEvents:
             await window._process_pygame_events()
 
             mock_session.send_mouse_button.assert_called_once_with(
-                100, 200, 1, is_released=False
+                100, 200, 0x1000, is_released=False
             )
 
     @pytest.mark.asyncio
@@ -261,7 +264,7 @@ class TestProcessPygameEvents:
             await window._process_pygame_events()
 
             mock_session.send_mouse_button.assert_called_once_with(
-                100, 200, 3, is_released=True
+                100, 200, 0x2000, is_released=True
             )
 
     @pytest.mark.asyncio

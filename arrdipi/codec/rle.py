@@ -13,8 +13,6 @@ from __future__ import annotations
 from arrdipi.errors import RleDecodeError
 
 # Interleaved RLE opcodes per [MS-RDPBCGR] 2.2.9.1.1.3.1.2.2
-# The high nibble of the first byte encodes the order type.
-# The low nibble encodes the run length (or 0 if extended).
 
 # Regular orders (color specified in stream)
 _REGULAR_BG_RUN = 0x00
@@ -37,9 +35,10 @@ _LITE_DITHERED_RUN = 0x0E
 _MEGA_MEGA_DITHERED_RUN = 0xF8
 
 # Special orders
-_BLACK_ORDER = 0xF9
-_WHITE_ORDER = 0xFA
-_START_LOSSY_ORDER = 0xFB
+_SPECIAL_FGBG_1 = 0xF9
+_SPECIAL_FGBG_2 = 0xFA
+_WHITE_ORDER = 0xFD
+_BLACK_ORDER = 0xFE
 
 # Default grayscale palette for 8-bit color depth
 _GRAYSCALE_PALETTE: list[tuple[int, int, int]] = [
@@ -47,12 +46,49 @@ _GRAYSCALE_PALETTE: list[tuple[int, int, int]] = [
 ]
 
 
+def _bytes_per_pixel_for_bpp(bpp: int) -> int:
+    """Return bytes per pixel for negotiated color depth."""
+    if bpp == 15:
+        return 2
+    return bpp // 8
+
+
+def _extract_code_id(header_byte: int) -> int:
+    """Extract compression order code ID from order header byte."""
+    if (header_byte & 0xC0) != 0xC0:
+        # Regular orders: 3-bit code id + 5-bit run length
+        return header_byte >> 5
+    if (header_byte & 0xF0) == 0xF0:
+        # MEGA_MEGA and special one-byte orders
+        return header_byte
+    # Lite orders: 4-bit code id + 4-bit run length
+    return header_byte >> 4
+
+
 def _extract_run_length(header_byte: int, data: bytes, offset: int) -> tuple[int, int]:
     """Extract run length from the header byte and optional extended bytes.
 
-    For regular orders, the low nibble of the header byte contains the
-    run length minus a base value. If the low nibble is 0, the next byte
-    contains the extended run length.
+    For regular orders, the low 5 bits of the header byte contain the run
+    length. If the value is 0, the next byte encodes a MEGA run and the
+    final run length is (next byte + 32).
+
+    Returns (run_length, bytes_consumed_for_length).
+    """
+    run_length = header_byte & 0x1F
+    if run_length == 0:
+        if offset >= len(data):
+            return 0, 0
+        run_length = data[offset] + 32
+        return run_length, 1
+    return run_length, 0
+
+
+def _extract_run_length_lite(header_byte: int, data: bytes, offset: int) -> tuple[int, int]:
+    """Extract run length for lite orders (low nibble has different base).
+
+    For lite orders, the low 4 bits contain the run length.
+    If low nibble is 0, the next byte encodes a MEGA run and the final
+    run length is (next byte + 16).
 
     Returns (run_length, bytes_consumed_for_length).
     """
@@ -60,30 +96,33 @@ def _extract_run_length(header_byte: int, data: bytes, offset: int) -> tuple[int
     if run_length == 0:
         if offset >= len(data):
             return 0, 0
-        run_length = data[offset] + 1
+        run_length = data[offset] + 16
         return run_length, 1
-    else:
-        run_length += 1
-        return run_length, 0
+    return run_length, 0
 
 
-def _extract_run_length_lite(header_byte: int, data: bytes, offset: int) -> tuple[int, int]:
-    """Extract run length for lite orders (low nibble has different base).
-
-    For lite orders the low nibble encodes run_length - 1.
-    If low nibble is 0x0F, the next byte is the extended length.
-
-    Returns (run_length, bytes_consumed_for_length).
-    """
-    run_length = header_byte & 0x0F
-    if run_length == 0x0F:
+def _extract_run_length_regular_fgbg(
+    header_byte: int, data: bytes, offset: int
+) -> tuple[int, int]:
+    """Extract run length for regular FGBG orders."""
+    run_length = header_byte & 0x1F
+    if run_length == 0:
         if offset >= len(data):
             return 0, 0
-        run_length = data[offset] + 1
-        return run_length, 1
-    else:
-        run_length += 1
-        return run_length, 0
+        return data[offset] + 1, 1
+    return run_length * 8, 0
+
+
+def _extract_run_length_lite_fgbg(
+    header_byte: int, data: bytes, offset: int
+) -> tuple[int, int]:
+    """Extract run length for lite FGBG orders."""
+    run_length = header_byte & 0x0F
+    if run_length == 0:
+        if offset >= len(data):
+            return 0, 0
+        return data[offset] + 1, 1
+    return run_length * 8, 0
 
 
 def _extract_mega_mega_length(data: bytes, offset: int) -> tuple[int, int]:
@@ -131,7 +170,7 @@ class RleCodec:
         Raises:
             RleDecodeError: On invalid or truncated data.
         """
-        if bpp not in (8, 16, 24, 32):
+        if bpp not in (8, 15, 16, 24, 32):
             raise RleDecodeError(rect_index, 0, f"Unsupported color depth: {bpp}")
 
         if compressed:
@@ -153,7 +192,7 @@ def _copy_raw(
 
     Validates that enough data is present for the given dimensions.
     """
-    bytes_per_pixel = bpp // 8
+    bytes_per_pixel = _bytes_per_pixel_for_bpp(bpp)
     # RDP rows are padded to 4-byte boundaries for raw data
     row_size = ((width * bytes_per_pixel + 3) & ~3)
     expected_size = row_size * height
@@ -186,7 +225,7 @@ def _decompress_rle(
     Implements the RLE decompression algorithm per
     [MS-RDPBCGR] Section 2.2.9.1.1.3.1.2.2.
     """
-    bytes_per_pixel = bpp // 8
+    bytes_per_pixel = _bytes_per_pixel_for_bpp(bpp)
     total_pixels = width * height
     output = bytearray(total_pixels * bytes_per_pixel)
 
@@ -213,25 +252,47 @@ def _decompress_rle(
     else:  # 32
         bg_color = b"\x00\x00\x00\x00"
 
+    row_bytes = width * bytes_per_pixel
+    f_insert_fg_pel = False
+
     while offset < len(data) and pixel_offset < total_pixels * bytes_per_pixel:
         opcode = data[offset]
         offset += 1
+        code_id = _extract_code_id(opcode)
+        is_first_line = pixel_offset < row_bytes
 
-        order_type = opcode >> 4
-
-        if opcode == _MEGA_MEGA_BG_RUN:
-            run_length, consumed = _extract_mega_mega_length(data, offset)
+        if code_id in (_REGULAR_BG_RUN, _MEGA_MEGA_BG_RUN):
+            if code_id == _REGULAR_BG_RUN:
+                run_length, consumed = _extract_run_length(opcode, data, offset)
+            else:
+                run_length, consumed = _extract_mega_mega_length(data, offset)
             offset += consumed
+
+            if f_insert_fg_pel and run_length > 0:
+                if pixel_offset < len(output):
+                    if is_first_line:
+                        output[pixel_offset:pixel_offset + bytes_per_pixel] = fg_color
+                    else:
+                        src = pixel_offset - row_bytes
+                        for j in range(bytes_per_pixel):
+                            output[pixel_offset + j] = output[src + j] ^ fg_color[j]
+                pixel_offset += bytes_per_pixel
+                run_length -= 1
+
             _write_bg_run(output, pixel_offset, run_length, bg_color, width, bytes_per_pixel)
             pixel_offset += run_length * bytes_per_pixel
+            f_insert_fg_pel = True
+            continue
 
-        elif opcode == _MEGA_MEGA_FG_RUN:
+        f_insert_fg_pel = False
+
+        if code_id == _MEGA_MEGA_FG_RUN:
             run_length, consumed = _extract_mega_mega_length(data, offset)
             offset += consumed
             _write_fg_run(output, pixel_offset, run_length, fg_color, width, bytes_per_pixel)
             pixel_offset += run_length * bytes_per_pixel
 
-        elif opcode == _MEGA_MEGA_FGBG_IMAGE:
+        elif code_id == _MEGA_MEGA_FGBG_IMAGE:
             run_length, consumed = _extract_mega_mega_length(data, offset)
             offset += consumed
             offset, pixel_offset = _write_fgbg_image(
@@ -239,7 +300,7 @@ def _decompress_rle(
                 fg_color, bg_color, width, bytes_per_pixel,
             )
 
-        elif opcode == _MEGA_MEGA_COLOR_RUN:
+        elif code_id == _MEGA_MEGA_COLOR_RUN:
             run_length, consumed = _extract_mega_mega_length(data, offset)
             offset += consumed
             color = data[offset:offset + bytes_per_pixel]
@@ -247,7 +308,7 @@ def _decompress_rle(
             _write_color_run(output, pixel_offset, run_length, color, bytes_per_pixel)
             pixel_offset += run_length * bytes_per_pixel
 
-        elif opcode == _MEGA_MEGA_COLOR_IMAGE:
+        elif code_id == _MEGA_MEGA_COLOR_IMAGE:
             run_length, consumed = _extract_mega_mega_length(data, offset)
             offset += consumed
             for _ in range(run_length):
@@ -261,7 +322,7 @@ def _decompress_rle(
                 offset += bytes_per_pixel
                 pixel_offset += bytes_per_pixel
 
-        elif opcode == _MEGA_MEGA_SET_FG_RUN:
+        elif code_id == _MEGA_MEGA_SET_FG_RUN:
             run_length, consumed = _extract_mega_mega_length(data, offset)
             offset += consumed
             fg_color = data[offset:offset + bytes_per_pixel]
@@ -269,7 +330,7 @@ def _decompress_rle(
             _write_fg_run(output, pixel_offset, run_length, fg_color, width, bytes_per_pixel)
             pixel_offset += run_length * bytes_per_pixel
 
-        elif opcode == _MEGA_MEGA_SET_FGBG_IMAGE:
+        elif code_id == _MEGA_MEGA_SET_FGBG_IMAGE:
             run_length, consumed = _extract_mega_mega_length(data, offset)
             offset += consumed
             fg_color = data[offset:offset + bytes_per_pixel]
@@ -279,7 +340,7 @@ def _decompress_rle(
                 fg_color, bg_color, width, bytes_per_pixel,
             )
 
-        elif opcode == _MEGA_MEGA_DITHERED_RUN:
+        elif code_id == _MEGA_MEGA_DITHERED_RUN:
             run_length, consumed = _extract_mega_mega_length(data, offset)
             offset += consumed
             color1 = data[offset:offset + bytes_per_pixel]
@@ -289,66 +350,60 @@ def _decompress_rle(
             _write_dithered_run(output, pixel_offset, run_length, color1, color2, bytes_per_pixel)
             pixel_offset += run_length * 2 * bytes_per_pixel
 
-        elif opcode == _BLACK_ORDER:
-            # Single black pixel
+        elif code_id == _SPECIAL_FGBG_1:
+            _unused_offset, pixel_offset = _write_fgbg_image(
+                bytes((0x03,)), 0, output, pixel_offset, 8,
+                fg_color, bg_color, width, bytes_per_pixel,
+            )
+
+        elif code_id == _SPECIAL_FGBG_2:
+            _unused_offset, pixel_offset = _write_fgbg_image(
+                bytes((0x05,)), 0, output, pixel_offset, 8,
+                fg_color, bg_color, width, bytes_per_pixel,
+            )
+
+        elif code_id == _BLACK_ORDER:
             output[pixel_offset:pixel_offset + bytes_per_pixel] = bg_color
             pixel_offset += bytes_per_pixel
 
-        elif opcode == _WHITE_ORDER:
-            # Single white pixel
+        elif code_id == _WHITE_ORDER:
             if bpp == 8:
                 output[pixel_offset:pixel_offset + bytes_per_pixel] = b"\xFF"
-            elif bpp == 16:
+            elif bpp == 15:
                 output[pixel_offset:pixel_offset + bytes_per_pixel] = b"\xFF\x7F"
+            elif bpp == 16:
+                output[pixel_offset:pixel_offset + bytes_per_pixel] = b"\xFF\xFF"
             elif bpp == 24:
                 output[pixel_offset:pixel_offset + bytes_per_pixel] = b"\xFF\xFF\xFF"
             else:
                 output[pixel_offset:pixel_offset + bytes_per_pixel] = b"\xFF\xFF\xFF\xFF"
             pixel_offset += bytes_per_pixel
 
-        elif opcode == _START_LOSSY_ORDER:
-            # Lossy marker — skip, continue processing
-            pass
-
-        elif order_type == 0x00:
-            # REGULAR_BG_RUN
-            run_length, consumed = _extract_run_length(opcode, data, offset)
-            offset += consumed
-            _write_bg_run(output, pixel_offset, run_length, bg_color, width, bytes_per_pixel)
-            pixel_offset += run_length * bytes_per_pixel
-
-        elif order_type == 0x01:
-            # REGULAR_FG_RUN
+        elif code_id == _REGULAR_FG_RUN:
             run_length, consumed = _extract_run_length(opcode, data, offset)
             offset += consumed
             _write_fg_run(output, pixel_offset, run_length, fg_color, width, bytes_per_pixel)
             pixel_offset += run_length * bytes_per_pixel
 
-        elif order_type == 0x02:
-            # REGULAR_FGBG_IMAGE
-            run_length, consumed = _extract_run_length(opcode, data, offset)
+        elif code_id == _REGULAR_FGBG_IMAGE:
+            run_length, consumed = _extract_run_length_regular_fgbg(opcode, data, offset)
             offset += consumed
-            # For FGBG, run_length is in units of 8 pixels per bitmask byte
             offset, pixel_offset = _write_fgbg_image(
-                data, offset, output, pixel_offset, run_length * 8,
+                data, offset, output, pixel_offset, run_length,
                 fg_color, bg_color, width, bytes_per_pixel,
             )
 
-        elif order_type == 0x03:
-            # REGULAR_COLOR_RUN
+        elif code_id == _REGULAR_COLOR_RUN:
             run_length, consumed = _extract_run_length(opcode, data, offset)
             offset += consumed
             if offset + bytes_per_pixel > len(data):
-                raise RleDecodeError(
-                    rect_index, offset, "Truncated color run data"
-                )
+                raise RleDecodeError(rect_index, offset, "Truncated color run data")
             color = data[offset:offset + bytes_per_pixel]
             offset += bytes_per_pixel
             _write_color_run(output, pixel_offset, run_length, color, bytes_per_pixel)
             pixel_offset += run_length * bytes_per_pixel
 
-        elif order_type == 0x04:
-            # REGULAR_COLOR_IMAGE
+        elif code_id == _REGULAR_COLOR_IMAGE:
             run_length, consumed = _extract_run_length(opcode, data, offset)
             offset += consumed
             for _ in range(run_length):
@@ -362,8 +417,7 @@ def _decompress_rle(
                 offset += bytes_per_pixel
                 pixel_offset += bytes_per_pixel
 
-        elif order_type == 0x0C:
-            # LITE_SET_FG_FG_RUN
+        elif code_id == _LITE_SET_FG_FG_RUN:
             run_length, consumed = _extract_run_length_lite(opcode, data, offset)
             offset += consumed
             if offset + bytes_per_pixel > len(data):
@@ -375,9 +429,8 @@ def _decompress_rle(
             _write_fg_run(output, pixel_offset, run_length, fg_color, width, bytes_per_pixel)
             pixel_offset += run_length * bytes_per_pixel
 
-        elif order_type == 0x0D:
-            # LITE_SET_FG_FGBG_IMAGE
-            run_length, consumed = _extract_run_length_lite(opcode, data, offset)
+        elif code_id == _LITE_SET_FG_FGBG_IMAGE:
+            run_length, consumed = _extract_run_length_lite_fgbg(opcode, data, offset)
             offset += consumed
             if offset + bytes_per_pixel > len(data):
                 raise RleDecodeError(
@@ -386,12 +439,11 @@ def _decompress_rle(
             fg_color = data[offset:offset + bytes_per_pixel]
             offset += bytes_per_pixel
             offset, pixel_offset = _write_fgbg_image(
-                data, offset, output, pixel_offset, run_length * 8,
+                data, offset, output, pixel_offset, run_length,
                 fg_color, bg_color, width, bytes_per_pixel,
             )
 
-        elif order_type == 0x0E:
-            # LITE_DITHERED_RUN
+        elif code_id == _LITE_DITHERED_RUN:
             run_length, consumed = _extract_run_length_lite(opcode, data, offset)
             offset += consumed
             if offset + bytes_per_pixel * 2 > len(data):
@@ -572,14 +624,28 @@ def _convert_to_rgba(
     """
     total_pixels = width * height
     rgba = bytearray(total_pixels * 4)
-    bytes_per_pixel = bpp // 8
-
     if bpp == 8:
         for i in range(total_pixels):
             if i >= len(raw_pixels):
                 break
             idx = raw_pixels[i]
             r, g, b = _GRAYSCALE_PALETTE[idx]
+            out_offset = i * 4
+            rgba[out_offset] = r
+            rgba[out_offset + 1] = g
+            rgba[out_offset + 2] = b
+            rgba[out_offset + 3] = 255
+
+    elif bpp == 15:
+        for i in range(total_pixels):
+            src = i * 2
+            if src + 1 >= len(raw_pixels):
+                break
+            pixel = raw_pixels[src] | (raw_pixels[src + 1] << 8)
+            # RGB555: 5 bits per channel
+            r = ((pixel >> 10) & 0x1F) * 255 // 31
+            g = ((pixel >> 5) & 0x1F) * 255 // 31
+            b = (pixel & 0x1F) * 255 // 31
             out_offset = i * 4
             rgba[out_offset] = r
             rgba[out_offset + 1] = g

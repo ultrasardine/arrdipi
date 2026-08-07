@@ -372,6 +372,7 @@ def _screen_config_builder() -> None:
     username = _ask("Username", "")
     domain = _ask("Domain", "")
     security = _ask("Security (auto/rdp/tls/nla)", "auto")
+    render_backend = _ask("Render backend (auto/surface/gpu)", "auto")
     width = _ask("Width", "1920")
     height = _ask("Height", "1080")
     verify_cert = _ask("Verify TLS certificate (yes/no)", "yes")
@@ -419,6 +420,9 @@ def _screen_config_builder() -> None:
     if domain:
         cmd_parts.append(f"--domain {domain}")
     cmd_parts.append(f"--security {security}")
+    cmd_parts.append(f"--render-backend {render_backend}")
+    if verify_str == "False":
+        cmd_parts.append("--no-verify-cert")
     cmd_parts.append(f"--width {width}")
     cmd_parts.append(f"--height {height}")
 
@@ -546,17 +550,33 @@ def _screen_connect_cli() -> None:
 
     port = input(f"  {GREEN}▸{RESET} Port [3389]: ").strip() or "3389"
     security = input(f"  {GREEN}▸{RESET} Security (auto/rdp/tls/nla) [auto]: ").strip() or "auto"
+    render_backend = (
+        input(f"  {GREEN}▸{RESET} Render backend (auto/surface/gpu) [auto]: ").strip()
+        or "auto"
+    )
+    verify_cert = input(
+        f"  {GREEN}▸{RESET} Verify TLS certificate (yes/no) [yes]: "
+    ).strip() or "yes"
+    no_verify_cert = verify_cert.lower() not in ("yes", "y", "true", "1")
 
     # Password — don't echo
     import getpass
     password = getpass.getpass(f"  {GREEN}▸{RESET} Password: ")
 
     print()
-    print(f"  {DIM}Connecting to {host}:{port} as {user} ({security})...{RESET}")
+    verify_label = "verify-cert" if not no_verify_cert else "no-verify-cert"
+    print(
+        f"  {DIM}Connecting to {host}:{port} as {user} ({security}, {verify_label})...{RESET}"
+    )
     print(_hr())
     print()
 
-    cmd = f'uv run arrdipi connect --host {host} --port {port} --user {user} --security {security}'
+    cmd = (
+        f"uv run arrdipi connect --host {host} --port {port} --user {user} "
+        f"--security {security} --render-backend {render_backend}"
+    )
+    if no_verify_cert:
+        cmd += " --no-verify-cert"
     os.environ["ARRDIPI_PASSWORD"] = password
     try:
         os.system(cmd)

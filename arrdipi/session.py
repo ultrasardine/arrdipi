@@ -734,6 +734,40 @@ class Session:
         BITMAP_COMPRESSION = 0x0001
         NO_BITMAP_COMPRESSION_HDR = 0x0400
 
+        def _can_parse_bitmap_rects(payload: bytes) -> bool:
+            """Validate payload shape: u16 rect count + TS_BITMAP_DATA entries."""
+            if len(payload) < 2:
+                return False
+
+            num = struct.unpack_from("<H", payload, 0)[0]
+            if num == 0:
+                return False
+
+            offset = 2
+            for _ in range(num):
+                if offset + 18 > len(payload):
+                    return False
+                bitmap_length = struct.unpack_from("<H", payload, offset + 16)[0]
+                offset += 18
+                if offset + bitmap_length > len(payload):
+                    return False
+                offset += bitmap_length
+            return True
+
+        # Some servers include an UpdateType(u16=0x0001) prefix before
+        # numberRectangles. Detect and strip it so field alignment stays correct.
+        if len(data) >= 4 and struct.unpack_from("<H", data, 0)[0] == 0x0001:
+            raw_ok = _can_parse_bitmap_rects(data)
+            shifted_ok = _can_parse_bitmap_rects(data[2:])
+            if shifted_ok and not raw_ok:
+                data = data[2:]
+            elif shifted_ok and raw_ok and len(data) >= 18:
+                bpp_raw = struct.unpack_from("<H", data, 14)[0]
+                bpp_shifted = struct.unpack_from("<H", data, 16)[0]
+                supported_bpp = {8, 15, 16, 24, 32}
+                if bpp_raw not in supported_bpp and bpp_shifted in supported_bpp:
+                    data = data[2:]
+
         reader = ByteReader(data, "BitmapUpdate")
         num_rects = reader.read_u16_le()
 

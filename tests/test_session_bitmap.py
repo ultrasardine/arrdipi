@@ -280,6 +280,27 @@ class TestCompressedRleRouting:
                 compressed_data, 2, 2, bpp, compressed=True, rect_index=0
             )
 
+    @pytest.mark.asyncio
+    async def test_update_type_prefix_is_detected(self) -> None:
+        """Parser accepts bitmap payloads prefixed with UpdateType=0x0001."""
+        session = _make_session()
+        session._surface = MagicMock()
+        session._surface.write_pixels = AsyncMock()
+
+        flags = BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR
+        compressed_data = b"\x00" * 10
+        rect = _build_ts_bitmap_data(0, 0, 1, 1, 2, 2, 16, flags, compressed_data)
+        payload = _build_bitmap_update([rect])
+        data = struct.pack("<H", 0x0001) + payload
+
+        with patch("arrdipi.session.RleCodec") as mock_rle:
+            mock_rle.decompress.return_value = b"\x00" * (2 * 2 * 4)
+            await session._process_bitmap_update(data)
+
+            mock_rle.decompress.assert_called_once_with(
+                compressed_data, 2, 2, 16, compressed=True, rect_index=0
+            )
+
 
 # ---------------------------------------------------------------------------
 # Tests: Task 9.7 — Compressed bpp == 32 routes to Rdp6BitmapCodec
@@ -514,8 +535,8 @@ class TestSyntheticBitmapData:
 
         # Create a simple compressed bitmap using a BLACK_ORDER + another pixel
         # For a 1x1 16bpp bitmap: just one pixel
-        # Use the actual RLE codec: F9 = BLACK_ORDER (single black pixel)
-        rle_data = b"\xF9"  # BLACK_ORDER → 1 pixel of black
+        # Use the actual RLE codec: FE = BLACK_ORDER (single black pixel)
+        rle_data = b"\xFE"  # BLACK_ORDER → 1 pixel of black
         flags = BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR
 
         rect = _build_ts_bitmap_data(0, 0, 0, 0, 1, 1, 16, flags, rle_data)
@@ -535,7 +556,7 @@ class TestSyntheticBitmapData:
 
         # TS_CD_HEADER (8 bytes) + RLE data (BLACK_ORDER)
         cd_header = b"\x00" * 8
-        rle_data = b"\xF9"  # BLACK_ORDER → 1 black pixel
+        rle_data = b"\xFE"  # BLACK_ORDER → 1 black pixel
         bitmap_data = cd_header + rle_data
         flags = BITMAP_COMPRESSION  # NO_BITMAP_COMPRESSION_HDR NOT set
 

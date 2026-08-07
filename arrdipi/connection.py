@@ -195,7 +195,7 @@ class ConnectionSequence:
             self._current_phase = 10
             await self._phase10_connection_finalization()
 
-            return Session(
+            session = Session(
                 tcp=tcp,
                 x224=x224,
                 mcs=self._mcs,  # type: ignore[arg-type]
@@ -204,6 +204,8 @@ class ConnectionSequence:
                 server_caps=server_caps,
                 share_id=share_id,
             )
+            await session.start()
+            return session
 
         except ConnectionPhaseError:
             # Re-raise if already wrapped

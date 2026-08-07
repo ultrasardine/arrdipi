@@ -136,6 +136,12 @@ arrdipi connect --host 192.168.1.100 --user admin --password secret
 # NLA with custom resolution
 arrdipi connect --host server.local --user admin --security nla --width 2560 --height 1440
 
+# Force GPU-backed presentation (falls back automatically if unavailable)
+arrdipi connect --host server.local --user admin --render-backend gpu
+
+# Trusted self-signed cert (disable verification)
+arrdipi connect --host localhost --user Administrator --security auto --no-verify-cert
+
 # Password from environment variable
 export ARRDIPI_PASSWORD="my-secret-password"
 arrdipi connect --host 10.0.0.5 --user admin
@@ -303,8 +309,10 @@ except arrdipi.ArrdipiError as e:
 | `--port` | `3389` | RDP server port |
 | `--domain` | `""` | Windows domain |
 | `--security` | `auto` | Security mode: `auto`, `rdp`, `tls`, `nla` |
+| `--no-verify-cert` | `false` | Disable TLS certificate verification (use only for trusted/self-signed servers) |
 | `--width` | `1920` | Desktop width in pixels |
 | `--height` | `1080` | Desktop height in pixels |
+| `--render-backend` | `auto` | Display backend: `auto`, `surface`, or `gpu` |
 | `--drive` | — | Drive redirection: `NAME:PATH` or `NAME:PATH:ro` (repeatable) |
 
 ### Environment Variables
